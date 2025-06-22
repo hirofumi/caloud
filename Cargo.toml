@@ -1,0 +1,13 @@
+[package]
+name = "caloud"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+mac-notification-sys = "0.6"
+nix = { version = "0.30", default-features = false, features = ["ioctl", "process", "signal", "term"] }
+regex = { version = "1", default-features = false, features = ["perf", "std", "unicode-perl"] }
+
+[profile.release]
+lto = true

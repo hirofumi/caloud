@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          sparse-checkout: /.github/workflows/*.yml
+          sparse-checkout-cone-mode: false
+      - uses: hirofumi/run-actionlint@ee50a31845315709b1bd54dcfe2a645c7cf9996a # v1.7.7
+  cargo:
+    runs-on: macos-latest
+    env:
+      RUSTFLAGS: -Dwarnings
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - run: rustup component add clippy rustfmt
+      - run: cargo version
+      - run: cargo fmt --check
+      - run: cargo check
+      - run: cargo clippy --tests
+      - run: cargo test
