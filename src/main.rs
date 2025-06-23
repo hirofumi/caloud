@@ -19,7 +19,7 @@ use std::thread;
 const BUNDLE_IDENTIFIER: &str = "com.apple.Terminal";
 const CONFIRMATIONS: &str = concat!(
     r"(?:\A|[\r\n])(?:\x1b\[[0-?][ -?]*[@-~])*│(?:\x1b\[[0-?][ -?]*[@-~])*\s",
-    r"(Do you want to (?:create|make this edit to|proceed)(?:\s+[^?\n]+)?\?)",
+    r"((?:Do you want|Would you like) to [^?\n]+\?)",
 );
 const PROMPTS: &str = r"(?:\A|[\r\n])(?:\x1b\[[0-?][ -?]*[@-~])*│(?:\x1b\[[0-?][ -?]*[@-~])*\s>\s";
 const NOTIFICATION_TITLE: &str = "Claude Code";
