@@ -12,7 +12,7 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStringExt;
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 use std::sync::OnceLock;
 use std::thread;
 
@@ -54,6 +54,15 @@ fn intercept(child: Pid, master: OwnedFd) -> anyhow::Result<()> {
     spawn_winsize_updater(master).context("spawn_winsize_updater")?;
     thread::spawn(move || io::copy(&mut io::stdin(), &mut writer));
 
+    let (notification_tx, notification_rx) = std::sync::mpsc::sync_channel::<String>(10);
+    thread::spawn(move || {
+        while let Ok(message) = notification_rx.recv() {
+            let message = strip_ascii_escape_sequences(&message);
+            let _ = send_notification(NOTIFICATION_TITLE, None, &message, None);
+            let _ = say(&message);
+        }
+    });
+
     loop {
         let n = reader.read(&mut buffer).context("read() failed")?;
         if n == 0 {
@@ -68,11 +77,8 @@ fn intercept(child: Pid, master: OwnedFd) -> anyhow::Result<()> {
         if let Some(matched) = confirmations.captures(&window).and_then(|c| c.get(1)) {
             let confirmation = matched.as_bytes();
             if !notified {
-                if let Ok(confirmation) =
-                    std::str::from_utf8(confirmation).map(strip_ascii_escape_sequences)
-                {
-                    let _ = send_notification(NOTIFICATION_TITLE, None, &confirmation, None);
-                    let _ = say(&confirmation);
+                if let Ok(confirmation_str) = std::str::from_utf8(confirmation) {
+                    let _ = notification_tx.try_send(confirmation_str.to_string());
                 }
                 notified = true;
             }
@@ -109,14 +115,13 @@ fn try_make_raw<Fd: AsFd>(fd: Fd) -> anyhow::Result<TermiosGuard<Fd>> {
     Ok(TermiosGuard(fd, termios))
 }
 
-fn say(message: &str) -> anyhow::Result<()> {
+fn say(message: &str) -> anyhow::Result<ExitStatus> {
     Command::new("say")
         .arg("-v")
         .arg(VOICE)
         .arg(message)
-        .spawn()
-        .context("Command::spawn() failed")?;
-    Ok(())
+        .status()
+        .context("Command::status() failed")
 }
 
 fn strip_ascii_escape_sequences(text: &str) -> Cow<str> {
