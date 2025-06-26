@@ -18,7 +18,7 @@ use std::thread;
 
 const BUNDLE_IDENTIFIER: &str = "com.apple.Terminal";
 const CONFIRMATIONS: &str = concat!(
-    r"(?:\A|[\r\n])(?:\x1b\[[0-?][ -?]*[@-~])*│(?:\x1b\[[0-?][ -?]*[@-~])*\s",
+    r"(?:\A|[\r\n])(?:\x1b\[[0-?][ -?]*[@-~])*│(?:\x1b\[[0-?][ -?]*[@-~]|\s)*",
     r"((?:Do you want|Would you like) to [^?\n]+\?)",
 );
 const PROMPTS: &str = r"(?:\A|[\r\n])(?:\x1b\[[0-?][ -?]*[@-~])*│(?:\x1b\[[0-?][ -?]*[@-~])*\s>\s";
@@ -180,4 +180,35 @@ fn update_winsize<Fd: AsRawFd>(fd: &Fd) -> anyhow::Result<()> {
     unsafe { set_winsize(fd, &winsize) }.context("set_winsize() failed")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bash_command_v_1_0_35() {
+        assert_eq!(
+            capture(b"\n\x1b[38;5;153m\xe2\x94\x82\x1b[39m Do you want to proceed?"),
+            Some(b"Do you want to proceed?".as_slice()),
+        )
+    }
+
+    #[test]
+    fn ready_to_code_v_1_0_35() {
+        assert_eq!(
+            capture(
+                b"\n\x1b[38;5;73m\xe2\x94\x82\x1b[39m \x1b[38;5;246mWould you like to proceed?",
+            ),
+            Some(b"Would you like to proceed?".as_slice()),
+        )
+    }
+
+    fn capture(input: &[u8]) -> Option<&[u8]> {
+        regex::bytes::Regex::new(CONFIRMATIONS)
+            .unwrap()
+            .captures(input)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_bytes())
+    }
 }
