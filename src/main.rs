@@ -1,11 +1,12 @@
-use anyhow::{Context, ensure};
-use mac_notification_sys::{send_notification, set_application};
+use crate::notification::{deliver, set_global_delegate};
+use anyhow::Context;
 use nix::pty::{ForkptyResult, forkpty};
 use nix::sys::signal::{SigHandler, SigSet, Signal, signal};
 use nix::sys::termios::{SetArg, Termios, cfmakeraw, tcgetattr, tcsetattr};
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::{Pid, execvp};
 use nix::{ioctl_read_bad, ioctl_write_ptr_bad};
+use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSRunLoop};
 use std::borrow::Cow;
 use std::ffi::CString;
 use std::fs::File;
@@ -15,6 +16,8 @@ use std::os::unix::ffi::OsStringExt;
 use std::process::{Command, ExitStatus};
 use std::sync::OnceLock;
 use std::thread;
+
+mod notification;
 
 const BUNDLE_IDENTIFIER: &str = "com.apple.Terminal";
 const CONFIRMATIONS: &str = concat!(
@@ -45,58 +48,80 @@ fn intercept(child: Pid, master: OwnedFd) -> anyhow::Result<()> {
     let prompts = regex::bytes::Regex::new(PROMPTS)?;
     let mut reader = File::from(master.try_clone()?);
     let mut writer = File::from(master.try_clone()?);
-    let mut stdout = io::stdout().lock();
-    let mut window: Vec<u8> = Vec::with_capacity(8192);
-    let mut buffer = [0u8; 4096];
-    let mut notified = false;
 
-    set_application(BUNDLE_IDENTIFIER).context("mac_notification_sys::set_application() failed")?;
+    set_global_delegate().context("set_global_delegate")?;
     spawn_winsize_updater(master).context("spawn_winsize_updater")?;
     thread::spawn(move || io::copy(&mut io::stdin(), &mut writer));
 
     let (notification_tx, notification_rx) = std::sync::mpsc::sync_channel::<String>(10);
+
+    thread::spawn(move || {
+        let mut stdout = io::stdout().lock();
+        let mut buffer = [0u8; 4096];
+        let mut window: Vec<u8> = Vec::with_capacity(2 * buffer.len());
+        let mut notified = false;
+
+        while let Ok(n) = reader.read(&mut buffer) {
+            if n == 0 {
+                break;
+            }
+            if stdout.write_all(&buffer[..n]).is_err() {
+                break;
+            }
+            if stdout.flush().is_err() {
+                break;
+            }
+
+            window.extend_from_slice(&buffer[..n]);
+            if let Some(matched) = confirmations.captures(&window).and_then(|c| c.get(1)) {
+                let confirmation = matched.as_bytes();
+                if !notified {
+                    if let Ok(confirmation_str) = std::str::from_utf8(confirmation) {
+                        let _ = notification_tx.try_send(confirmation_str.to_string());
+                    }
+                    notified = true;
+                }
+                window.clear();
+            } else if prompts.find(&window).is_some() {
+                notified = false;
+                window.clear();
+            } else if window.len() > window.capacity() / 2 {
+                window.drain(0..(window.len() / 2));
+            }
+        }
+    });
+
     thread::spawn(move || {
         while let Ok(message) = notification_rx.recv() {
             let message = strip_ascii_escape_sequences(&message);
-            let _ = send_notification(NOTIFICATION_TITLE, None, &message, None);
+            let _ = deliver(NOTIFICATION_TITLE, &message);
             let _ = say(&message);
         }
     });
 
-    loop {
-        let n = reader.read(&mut buffer).context("read() failed")?;
-        if n == 0 {
-            break;
-        }
-        stdout
-            .write_all(&buffer[..n])
-            .context("write_all() failed")?;
-        stdout.flush().context("flush() failed")?;
+    let (exit_tx, exit_rx) = std::sync::mpsc::channel();
 
-        window.extend_from_slice(&buffer[..n]);
-        if let Some(matched) = confirmations.captures(&window).and_then(|c| c.get(1)) {
-            let confirmation = matched.as_bytes();
-            if !notified {
-                if let Ok(confirmation_str) = std::str::from_utf8(confirmation) {
-                    let _ = notification_tx.try_send(confirmation_str.to_string());
-                }
-                notified = true;
+    thread::spawn(move || {
+        let status = waitpid(child, Some(WaitPidFlag::empty()));
+        let _ = exit_tx.send(status);
+    });
+
+    unsafe {
+        let run_loop = NSRunLoop::mainRunLoop();
+        loop {
+            match exit_rx.try_recv() {
+                Ok(Ok(WaitStatus::Exited(_, 0))) => return Ok(()),
+                Ok(Ok(status)) => anyhow::bail!("claude did not exit normally: {:?}", status),
+                Ok(Err(e)) => anyhow::bail!(e),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(e) => anyhow::bail!(e),
             }
-            window.clear();
-        } else if prompts.find(&window).is_some() {
-            notified = false;
-            window.clear();
-        } else if window.len() > window.capacity() / 2 {
-            window.drain(0..(window.len() / 2));
+            run_loop.runMode_beforeDate(
+                NSDefaultRunLoopMode,
+                &NSDate::dateWithTimeIntervalSinceNow(0.1),
+            );
         }
     }
-
-    let status = waitpid(child, Some(WaitPidFlag::empty()))?;
-    ensure!(
-        matches!(status, WaitStatus::Exited(_, 0)),
-        "claude did not exit normally: {status:?}",
-    );
-    Ok(())
 }
 
 struct TermiosGuard<Fd: AsFd>(Fd, Termios);

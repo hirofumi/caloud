@@ -5,8 +5,10 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
-mac-notification-sys = "0.6"
 nix = { version = "0.30", default-features = false, features = ["ioctl", "process", "signal", "term"] }
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSRunningApplication"] }
+objc2-foundation = { version = "0.3", features = ["NSUserNotification"] }
 regex = { version = "1", default-features = false, features = ["perf", "std", "unicode-perl"] }
 
 [profile.release]
