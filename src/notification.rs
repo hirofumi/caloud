@@ -32,10 +32,13 @@ pub fn set_global_delegate() -> anyhow::Result<()> {
             #[unsafe(method(userNotificationCenter:didActivateNotification:))]
             fn did_activate_notification(
                 &self,
-                _center: &NSUserNotificationCenter,
-                _notification: &NSUserNotification,
+                center: &NSUserNotificationCenter,
+                notification: &NSUserNotification,
             ) {
                 let _ = activate_application();
+                unsafe {
+                    center.removeDeliveredNotification(notification);
+                }
             }
         }
     );
