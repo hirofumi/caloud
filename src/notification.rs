@@ -135,8 +135,10 @@ fn is_osc9_supported() -> bool {
 
 fn find_application() -> Option<Retained<NSRunningApplication>> {
     unsafe {
-        iterate_ancestor_pids()
-            .find_map(|pid| NSRunningApplication::runningApplicationWithProcessIdentifier(pid))
+        iterate_ancestor_pids().find_map(|pid| {
+            NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+                .filter(|app| app.bundleIdentifier().is_some())
+        })
     }
 }
 
