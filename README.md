@@ -7,6 +7,7 @@ A wrapper for `claude` that adds Notification Center support and `say`-based voi
 - macOS
 - Rust
 - `claude` binary available in your `$PATH`
+- `claude config set -g preferredNotifChannel iterm2` (or `iterm2_with_bell`)
 
 ## Installation
 

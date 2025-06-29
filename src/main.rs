@@ -1,4 +1,6 @@
-use crate::notification::{deliver, set_global_delegate};
+use crate::notification::{
+    deliver_if_osc9_unsupported, find_osc9_notification_message, set_global_delegate,
+};
 use anyhow::Context;
 use nix::pty::{ForkptyResult, forkpty};
 use nix::sys::signal::{SigHandler, SigSet, Signal, signal};
@@ -7,24 +9,16 @@ use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::{Pid, execvp};
 use nix::{ioctl_read_bad, ioctl_write_ptr_bad};
 use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSRunLoop};
-use std::borrow::Cow;
 use std::ffi::CString;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStringExt;
 use std::process::{Command, ExitStatus};
-use std::sync::OnceLock;
 use std::thread;
 
 mod notification;
 
-const BUNDLE_IDENTIFIER: &str = "com.apple.Terminal";
-const CONFIRMATIONS: &str = concat!(
-    r"(?:\A|[\r\n])(?:\x1b\[[0-?][ -?]*[@-~])*│(?:\x1b\[[0-?][ -?]*[@-~]|\s)*",
-    r"((?:Do you want|Would you like) to [^?\n]+\?)",
-);
-const PROMPTS: &str = r"(?:\A|[\r\n])(?:\x1b\[[0-?][ -?]*[@-~])*│(?:\x1b\[[0-?][ -?]*[@-~])*\s>\s";
 const NOTIFICATION_TITLE: &str = "Claude Code";
 const VOICE: &str = "Samantha";
 
@@ -44,8 +38,6 @@ fn main() -> anyhow::Result<()> {
 
 fn intercept(child: Pid, master: OwnedFd) -> anyhow::Result<()> {
     let _termios = try_make_raw(io::stdin()).context("try_make_raw")?;
-    let confirmations = regex::bytes::Regex::new(CONFIRMATIONS)?;
-    let prompts = regex::bytes::Regex::new(PROMPTS)?;
     let mut reader = File::from(master.try_clone()?);
     let mut writer = File::from(master.try_clone()?);
 
@@ -59,7 +51,6 @@ fn intercept(child: Pid, master: OwnedFd) -> anyhow::Result<()> {
         let mut stdout = io::stdout().lock();
         let mut buffer = [0u8; 4096];
         let mut window: Vec<u8> = Vec::with_capacity(2 * buffer.len());
-        let mut notified = false;
 
         while let Ok(n) = reader.read(&mut buffer) {
             if n == 0 {
@@ -73,17 +64,10 @@ fn intercept(child: Pid, master: OwnedFd) -> anyhow::Result<()> {
             }
 
             window.extend_from_slice(&buffer[..n]);
-            if let Some(matched) = confirmations.captures(&window).and_then(|c| c.get(1)) {
-                let confirmation = matched.as_bytes();
-                if !notified {
-                    if let Ok(confirmation_str) = std::str::from_utf8(confirmation) {
-                        let _ = notification_tx.try_send(confirmation_str.to_string());
-                    }
-                    notified = true;
+            if let Some(message) = find_osc9_notification_message(&window) {
+                if let Ok(message) = std::str::from_utf8(message.trim_ascii()) {
+                    let _ = notification_tx.try_send(message.to_string());
                 }
-                window.clear();
-            } else if prompts.find(&window).is_some() {
-                notified = false;
                 window.clear();
             } else if window.len() > window.capacity() / 2 {
                 window.drain(0..(window.len() / 2));
@@ -93,8 +77,7 @@ fn intercept(child: Pid, master: OwnedFd) -> anyhow::Result<()> {
 
     thread::spawn(move || {
         while let Ok(message) = notification_rx.recv() {
-            let message = strip_ascii_escape_sequences(&message);
-            let _ = deliver(NOTIFICATION_TITLE, &message);
+            let _ = deliver_if_osc9_unsupported(NOTIFICATION_TITLE, &message);
             let _ = say(&message);
         }
     });
@@ -149,17 +132,6 @@ fn say(message: &str) -> anyhow::Result<ExitStatus> {
         .context("Command::status() failed")
 }
 
-fn strip_ascii_escape_sequences(text: &str) -> Cow<str> {
-    static ASCII_ESCAPE_SEQUENCES: OnceLock<regex::Regex> = OnceLock::new();
-    ASCII_ESCAPE_SEQUENCES
-        .get_or_init(|| {
-            regex::Regex::new(r"\x1b\[[0-?][ -?]*[@-~]")
-                .context("failed to initialize ASCII_ESCAPE_SEQUENCES")
-                .unwrap()
-        })
-        .replace_all(text, "")
-}
-
 fn spawn_winsize_updater<Fd: AsRawFd + Send + Sync + 'static>(fd: Fd) -> anyhow::Result<()> {
     update_winsize(&fd).context("update_winsize() failed")?;
 
@@ -205,35 +177,4 @@ fn update_winsize<Fd: AsRawFd>(fd: &Fd) -> anyhow::Result<()> {
     unsafe { set_winsize(fd, &winsize) }.context("set_winsize() failed")?;
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bash_command_v_1_0_35() {
-        assert_eq!(
-            capture(b"\n\x1b[38;5;153m\xe2\x94\x82\x1b[39m Do you want to proceed?"),
-            Some(b"Do you want to proceed?".as_slice()),
-        )
-    }
-
-    #[test]
-    fn ready_to_code_v_1_0_35() {
-        assert_eq!(
-            capture(
-                b"\n\x1b[38;5;73m\xe2\x94\x82\x1b[39m \x1b[38;5;246mWould you like to proceed?",
-            ),
-            Some(b"Would you like to proceed?".as_slice()),
-        )
-    }
-
-    fn capture(input: &[u8]) -> Option<&[u8]> {
-        regex::bytes::Regex::new(CONFIRMATIONS)
-            .unwrap()
-            .captures(input)
-            .and_then(|c| c.get(1))
-            .map(|m| m.as_bytes())
-    }
 }

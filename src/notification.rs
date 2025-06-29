@@ -1,4 +1,3 @@
-use crate::BUNDLE_IDENTIFIER;
 use anyhow::bail;
 use nix::libc;
 use objc2::ffi::{class_getInstanceMethod, method_exchangeImplementations};
@@ -13,7 +12,7 @@ use objc2_foundation::{
 use objc2_foundation::{NSUserNotification, NSUserNotificationCenter};
 use std::iter;
 use std::mem;
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
 
 pub fn set_global_delegate() -> anyhow::Result<()> {
     let Some(main_thread_marker) = MainThreadMarker::new() else {
@@ -59,7 +58,23 @@ pub fn set_global_delegate() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn deliver(title: &str, message: &str) -> anyhow::Result<()> {
+pub fn find_osc9_notification_message(haystack: &[u8]) -> Option<&[u8]> {
+    static OSC9_NOTIFICATIONS: OnceLock<regex::bytes::Regex> = OnceLock::new();
+
+    let osc9_notifications = OSC9_NOTIFICATIONS
+        .get_or_init(|| regex::bytes::Regex::new(r"\x1b]9;((?s).*?)(?:\x07|\x1b\\)").unwrap());
+
+    osc9_notifications
+        .captures(haystack)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_bytes())
+}
+
+pub fn deliver_if_osc9_unsupported(title: &str, message: &str) -> anyhow::Result<bool> {
+    if is_osc9_supported() {
+        return Ok(false);
+    }
+
     #[expect(deprecated)]
     unsafe {
         let notification = NSUserNotification::new();
@@ -68,7 +83,8 @@ pub fn deliver(title: &str, message: &str) -> anyhow::Result<()> {
         NSUserNotificationCenter::defaultUserNotificationCenter()
             .deliverNotification(&notification);
     }
-    Ok(())
+
+    Ok(true)
 }
 
 fn swizzle_bundle_identifier() {
@@ -80,7 +96,7 @@ fn swizzle_bundle_identifier() {
         impl FakeBundle {
             #[unsafe(method(bundleIdentifier))]
             fn bundle_identifier(&self) -> &NSString {
-                ns_string!(BUNDLE_IDENTIFIER)
+                ns_string!("com.apple.Terminal")
             }
         }
     );
@@ -95,19 +111,37 @@ fn swizzle_bundle_identifier() {
 
 fn activate_application() -> bool {
     unsafe {
-        iter::successors(getppid_of(libc::getppid()), |&pid| getppid_of(pid))
-            .find_map(|pid| NSRunningApplication::runningApplicationWithProcessIdentifier(pid))
-            .map(|app| {
-                app.activateWithOptions(
-                    #[expect(deprecated)]
-                    NSApplicationActivationOptions::ActivateIgnoringOtherApps,
-                )
-            })
+        find_application().map(|app| {
+            app.activateWithOptions(
+                #[expect(deprecated)]
+                NSApplicationActivationOptions::ActivateIgnoringOtherApps,
+            )
+        })
     }
     .unwrap_or_default()
 }
 
-unsafe fn getppid_of(pid: libc::pid_t) -> Option<libc::pid_t> {
+fn is_osc9_supported() -> bool {
+    const GHOSTTY: &str = "com.mitchellh.ghostty"; // https://ghostty.org/docs/config/reference#desktop-notifications
+    const ITERM2: &str = "com.googlecode.iterm2"; // https://iterm2.com/documentation-escape-codes.html
+
+    unsafe { find_application().and_then(|app| app.bundleIdentifier()) }
+        .map(|bundle_identifier| matches!(bundle_identifier.to_string().as_str(), GHOSTTY | ITERM2))
+        .unwrap_or_default()
+}
+
+fn find_application() -> Option<Retained<NSRunningApplication>> {
+    unsafe {
+        iterate_ancestor_pids()
+            .find_map(|pid| NSRunningApplication::runningApplicationWithProcessIdentifier(pid))
+    }
+}
+
+fn iterate_ancestor_pids() -> impl Iterator<Item = libc::pid_t> {
+    iter::successors(Some(std::process::id() as _), |&pid| getppid_of(pid))
+}
+
+fn getppid_of(pid: libc::pid_t) -> Option<libc::pid_t> {
     if pid == 0 {
         return None;
     }
@@ -149,8 +183,19 @@ mod tests {
     use std::process::Command;
 
     #[test]
+    fn v1_0_35_edit_file() {
+        let got = find_osc9_notification_message(
+            b"\x1b]9;\n\nClaude needs your permission to use Update\x07",
+        );
+        assert_eq!(
+            got,
+            Some(b"\n\nClaude needs your permission to use Update".as_slice())
+        );
+    }
+
+    #[test]
     fn ancestor_pids() {
-        let got = unsafe { iter::successors(Some(libc::getpid()), |&pid| getppid_of(pid)) }
+        let got = iterate_ancestor_pids()
             .map(|pid| pid as u32)
             .collect::<Vec<_>>();
         let want = iter::successors(Some(std::process::id()), |pid| {
