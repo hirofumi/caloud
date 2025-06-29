@@ -96,7 +96,6 @@ fn swizzle_bundle_identifier() {
 fn activate_application() -> bool {
     unsafe {
         iter::successors(getppid_of(libc::getppid()), |&pid| getppid_of(pid))
-            .take_while(|&pid| pid > 1)
             .find_map(|pid| NSRunningApplication::runningApplicationWithProcessIdentifier(pid))
             .map(|app| app.activateWithOptions(NSApplicationActivationOptions(0)))
     }
@@ -104,6 +103,10 @@ fn activate_application() -> bool {
 }
 
 unsafe fn getppid_of(pid: libc::pid_t) -> Option<libc::pid_t> {
+    if pid == 0 {
+        return None;
+    }
+
     #[repr(C)]
     struct proc_bsdshortinfo {
         pbsi_pid: u32,
@@ -132,5 +135,28 @@ unsafe fn getppid_of(pid: libc::pid_t) -> Option<libc::pid_t> {
             PROC_PIDT_SHORTBSDINFO_SIZE,
         );
         (ret == PROC_PIDT_SHORTBSDINFO_SIZE).then_some(info.pbsi_ppid as libc::pid_t)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn ancestor_pids() {
+        let got = unsafe { iter::successors(Some(libc::getpid()), |&pid| getppid_of(pid)) }
+            .map(|pid| pid as u32)
+            .collect::<Vec<_>>();
+        let want = iter::successors(Some(std::process::id()), |pid| {
+            Command::new("ps")
+                .args(["-p", &pid.to_string(), "-o", "ppid="])
+                .output()
+                .ok()
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .and_then(|stdout| stdout.trim().parse().ok())
+        })
+        .collect::<Vec<_>>();
+        assert_eq!(got, want);
     }
 }
