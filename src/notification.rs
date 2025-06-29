@@ -97,7 +97,12 @@ fn activate_application() -> bool {
     unsafe {
         iter::successors(getppid_of(libc::getppid()), |&pid| getppid_of(pid))
             .find_map(|pid| NSRunningApplication::runningApplicationWithProcessIdentifier(pid))
-            .map(|app| app.activateWithOptions(NSApplicationActivationOptions(0)))
+            .map(|app| {
+                app.activateWithOptions(
+                    #[expect(deprecated)]
+                    NSApplicationActivationOptions::ActivateIgnoringOtherApps,
+                )
+            })
     }
     .unwrap_or_default()
 }
