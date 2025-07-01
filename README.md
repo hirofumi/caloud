@@ -2,6 +2,10 @@
 
 A wrapper for `claude` that adds Notification Center support and `say`-based voice notifications.
 
+> [!NOTE]
+>
+> It's likely unnecessary now that Claude Code v1.0.38 supports [hooks](https://docs.anthropic.com/en/docs/claude-code/hooks).
+
 ## Prerequisites
 
 - macOS
