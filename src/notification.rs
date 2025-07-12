@@ -12,7 +12,7 @@ use objc2_foundation::{
 use objc2_foundation::{NSUserNotification, NSUserNotificationCenter};
 use std::iter;
 use std::mem;
-use std::sync::{Once, OnceLock};
+use std::sync::Once;
 
 pub fn set_global_delegate() -> anyhow::Result<()> {
     let Some(main_thread_marker) = MainThreadMarker::new() else {
@@ -59,18 +59,6 @@ pub fn set_global_delegate() -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-pub fn find_osc9_notification_message(haystack: &[u8]) -> Option<&[u8]> {
-    static OSC9_NOTIFICATIONS: OnceLock<regex::bytes::Regex> = OnceLock::new();
-
-    let osc9_notifications = OSC9_NOTIFICATIONS
-        .get_or_init(|| regex::bytes::Regex::new(r"\x1b]9;((?s).*?)(?:\x07|\x1b\\)").unwrap());
-
-    osc9_notifications
-        .captures(haystack)
-        .and_then(|c| c.get(1))
-        .map(|m| m.as_bytes())
 }
 
 pub fn deliver_if_osc9_unsupported(title: &str, message: &str) -> anyhow::Result<bool> {
@@ -186,17 +174,6 @@ fn getppid_of(pid: libc::pid_t) -> Option<libc::pid_t> {
 mod tests {
     use super::*;
     use std::process::Command;
-
-    #[test]
-    fn v1_0_35_edit_file() {
-        let got = find_osc9_notification_message(
-            b"\x1b]9;\n\nClaude needs your permission to use Update\x07",
-        );
-        assert_eq!(
-            got,
-            Some(b"\n\nClaude needs your permission to use Update".as_slice())
-        );
-    }
 
     #[test]
     fn ancestor_pids() {

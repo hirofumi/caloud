@@ -1,6 +1,5 @@
-use crate::notification::{
-    deliver_if_osc9_unsupported, find_osc9_notification_message, set_global_delegate,
-};
+use crate::notification::{deliver_if_osc9_unsupported, set_global_delegate};
+use crate::tty_text::{Buffer, EscapeSequence};
 use anyhow::Context;
 use nix::pty::{ForkptyResult, forkpty};
 use nix::sys::signal::{SigHandler, SigSet, Signal, signal};
@@ -11,15 +10,16 @@ use nix::{ioctl_read_bad, ioctl_write_ptr_bad};
 use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSRunLoop};
 use std::ffi::CString;
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStringExt;
 use std::process::{Command, ExitStatus};
 use std::thread;
 
 mod notification;
+mod tty_text;
 
-const NOTIFICATION_TITLE: &str = "Claude Code";
+const DEFAULT_NOTIFICATION_TITLE: &str = "Claude Code";
 const VOICE: &str = "Samantha";
 
 fn main() -> anyhow::Result<()> {
@@ -45,39 +45,45 @@ fn intercept(child: Pid, master: OwnedFd) -> anyhow::Result<()> {
     spawn_winsize_updater(master).context("spawn_winsize_updater")?;
     thread::spawn(move || io::copy(&mut io::stdin(), &mut writer));
 
-    let (notification_tx, notification_rx) = std::sync::mpsc::sync_channel::<String>(10);
+    let (notification_tx, notification_rx) = std::sync::mpsc::sync_channel::<(String, String)>(10);
 
     thread::spawn(move || {
         let mut stdout = io::stdout().lock();
-        let mut buffer = [0u8; 4096];
-        let mut window: Vec<u8> = Vec::with_capacity(2 * buffer.len());
+        let mut title = DEFAULT_NOTIFICATION_TITLE.to_string();
+        let mut buffer = Buffer::<8192>::new();
 
-        while let Ok(n) = reader.read(&mut buffer) {
+        while let Ok(n) = buffer.extend_from_read(&mut reader) {
             if n == 0 {
                 break;
             }
-            if stdout.write_all(&buffer[..n]).is_err() {
-                break;
-            }
-            if stdout.flush().is_err() {
-                break;
+
+            for fragment in buffer.drain() {
+                if stdout.write_all(fragment.data()).is_err() {
+                    return;
+                }
+                match fragment.escape_sequence() {
+                    None | Some(EscapeSequence::Incomplete | EscapeSequence::Other) => {
+                        continue;
+                    }
+                    Some(EscapeSequence::ChangeIconNameAndWindowTitle(new_title)) => {
+                        title.replace_range(.., &String::from_utf8_lossy(new_title.trim_ascii()));
+                    }
+                    Some(EscapeSequence::PostNotification(message)) => {
+                        let message = String::from_utf8_lossy(message.trim_ascii()).into_owned();
+                        let _ = notification_tx.try_send((title.clone(), message));
+                    }
+                }
             }
 
-            window.extend_from_slice(&buffer[..n]);
-            if let Some(message) = find_osc9_notification_message(&window) {
-                if let Ok(message) = std::str::from_utf8(message.trim_ascii()) {
-                    let _ = notification_tx.try_send(message.to_string());
-                }
-                window.clear();
-            } else if window.len() > window.capacity() / 2 {
-                window.drain(0..(window.len() / 2));
+            if stdout.flush().is_err() {
+                break;
             }
         }
     });
 
     thread::spawn(move || {
-        while let Ok(message) = notification_rx.recv() {
-            let _ = deliver_if_osc9_unsupported(NOTIFICATION_TITLE, &message);
+        while let Ok((title, message)) = notification_rx.recv() {
+            let _ = deliver_if_osc9_unsupported(&title, &message);
             let _ = say(&message);
         }
     });
