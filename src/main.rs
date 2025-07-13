@@ -57,7 +57,16 @@ fn intercept(child: Pid, master: OwnedFd) -> anyhow::Result<()> {
                 break;
             }
 
-            for fragment in buffer.drain() {
+            for fragment in {
+                #[cfg(feature = "line-wrapping-adjustment")]
+                {
+                    buffer.drain().adjust_line_wrapping()
+                }
+                #[cfg(not(feature = "line-wrapping-adjustment"))]
+                {
+                    buffer.drain()
+                }
+            } {
                 if stdout.write_all(fragment.data()).is_err() {
                     return;
                 }

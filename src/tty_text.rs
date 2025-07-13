@@ -18,11 +18,12 @@ impl<const N: usize> Buffer<N> {
         self.start == 0 && self.end == N
     }
 
-    pub fn drain(&mut self) -> impl Iterator<Item = Fragment> {
+    pub fn drain(&mut self) -> FragmentIterator<'_> {
         FragmentIterator {
             full: self.is_full(),
             data: &self.data[..self.end],
             offset: &mut self.start,
+            previous_offset: None,
         }
     }
 
@@ -66,10 +67,31 @@ pub enum Osc<'a> {
     Other,
 }
 
-struct FragmentIterator<'a> {
+pub struct FragmentIterator<'a> {
     full: bool,
     data: &'a [u8],
     offset: &'a mut usize,
+    previous_offset: Option<usize>,
+}
+
+#[cfg(feature = "line-wrapping-adjustment")]
+impl<'a> FragmentIterator<'a> {
+    pub fn adjust_line_wrapping(self) -> impl Iterator<Item = Fragment<'a>> {
+        LineWrappingAdjuster::new(self)
+    }
+
+    fn has_next(&self) -> bool {
+        *self.offset < self.data.len()
+    }
+
+    fn step_back(&mut self) -> bool {
+        if let Some(previous_offset) = self.previous_offset.take() {
+            *self.offset = previous_offset;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl<'a> Iterator for FragmentIterator<'a> {
@@ -85,6 +107,7 @@ impl<'a> Iterator for FragmentIterator<'a> {
         let mut emit = |consumed, osc| {
             debug_assert!(0 < consumed);
             debug_assert!(consumed <= remaining.len());
+            self.previous_offset = Some(*self.offset);
             *self.offset += consumed;
             Some(Fragment::new(&self.data[offset..*self.offset], osc))
         };
@@ -124,6 +147,100 @@ impl<'a> Iterator for FragmentIterator<'a> {
             b"9;" => emit(n, Some(Osc::PostNotification(p()))),
             _ => emit(n, Some(Osc::Other)),
         }
+    }
+}
+
+#[cfg(feature = "line-wrapping-adjustment")]
+struct LineWrappingAdjuster<'a> {
+    inner: FragmentIterator<'a>,
+    deferred: std::collections::VecDeque<Fragment<'a>>,
+}
+
+#[cfg(feature = "line-wrapping-adjustment")]
+impl<'a> LineWrappingAdjuster<'a> {
+    fn new(inner: FragmentIterator<'a>) -> Self {
+        Self {
+            inner,
+            deferred: std::collections::VecDeque::new(),
+        }
+    }
+}
+
+#[cfg(feature = "line-wrapping-adjustment")]
+impl<'a> Iterator for LineWrappingAdjuster<'a> {
+    type Item = Fragment<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(fragment) = self.deferred.pop_front() {
+            return Some(fragment);
+        }
+
+        let fragment = self.inner.next()?;
+
+        if fragment.osc().is_some() {
+            return Some(fragment);
+        }
+
+        let mut data = fragment.data();
+        let mut offset = 0;
+        loop {
+            let Some(i) = data[offset..].windows(3).position(|w| w == b"://") else {
+                self.deferred.push_back(Fragment::new(data, None));
+                break;
+            };
+            if data[usize::max(0, offset + i - 4)..offset + i] != b"file"[..]
+                && data[usize::max(0, offset + i - 4)..offset + i] != b"http"[..]
+                && data[usize::max(0, offset + i - 5)..offset + i] != b"https"[..]
+            {
+                offset += i + 3;
+                continue;
+            }
+            self.deferred
+                .push_back(Fragment::new(&data[offset..offset + i + 3], None));
+            offset += i + 3;
+            let mut gap_fragment = None;
+            loop {
+                let url_break = data[offset..]
+                    .iter()
+                    .position(|&b| !b.is_ascii_graphic())
+                    .map(|i| offset + i)
+                    .unwrap_or(data.len());
+                let mut url_cont = url_break;
+                while url_cont < data.len() {
+                    if data[url_cont..].starts_with(b"\x1b[") {
+                        url_cont += 2;
+                        while url_cont < data.len() {
+                            if (b'\x40'..=b'\x7e').contains(&data[url_cont]) {
+                                url_cont += 1;
+                                break;
+                            }
+                            url_cont += 1;
+                        }
+                        continue;
+                    } else if data[url_cont..].starts_with(b"\r\n  ") {
+                        url_cont += 4;
+                        continue;
+                    } else {
+                        break;
+                    }
+                }
+                self.deferred
+                    .push_back(Fragment::new(&data[offset..url_break], None));
+                offset = url_cont;
+                if url_cont == url_break {
+                    break;
+                }
+                gap_fragment = Some(Fragment::new(&data[url_break..url_cont], None));
+            }
+            if offset == data.len() && !self.inner.has_next() && self.inner.step_back() {
+                return None;
+            }
+            self.deferred.extend(gap_fragment);
+            data = &data[offset..];
+            offset = 0;
+        }
+
+        self.deferred.pop_front()
     }
 }
 
@@ -239,6 +356,37 @@ mod tests {
         assert_eq!(
             buffer.drain().collect::<Vec<_>>(),
             vec![Fragment::new(b"\x1b]4;0;#000000\x1b\\", Some(Osc::Other))],
+        );
+    }
+
+    #[cfg(feature = "line-wrapping-adjustment")]
+    #[test]
+    fn adjust_line_wrapping() {
+        let mut buffer = Buffer::<1024>::new();
+        buffer
+            .extend_from_read(
+                [
+                    &b"\x1b[38;5;231m\xE2\x8F\xBA\x1b[39m \x1b[38;5;153mURL: https://example.c"[..],
+                    &b"  om/long/long/path/to/re"[..],
+                    &b"  source and some more text."[..],
+                ]
+                .join(&b"\r\n"[..])
+                .as_slice(),
+            )
+            .unwrap();
+        assert_eq!(
+            buffer.drain().adjust_line_wrapping().collect::<Vec<_>>(),
+            vec![
+                Fragment::new(
+                    b"\x1b[38;5;231m\xE2\x8F\xBA\x1b[39m \x1b[38;5;153mURL: https://",
+                    None
+                ),
+                Fragment::new(b"example.c", None),
+                Fragment::new(b"om/long/long/path/to/re", None),
+                Fragment::new(b"source", None),
+                Fragment::new(b"\r\n  ", None),
+                Fragment::new(b" and some more text.", None),
+            ]
         );
     }
 }

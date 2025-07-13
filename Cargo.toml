@@ -3,6 +3,9 @@ name = "caloud"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+line-wrapping-adjustment = []
+
 [dependencies]
 anyhow = "1"
 nix = { version = "0.30", default-features = false, features = ["ioctl", "process", "signal", "term"] }
