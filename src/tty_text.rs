@@ -41,28 +41,25 @@ impl<const N: usize> Buffer<N> {
 #[derive(Debug, PartialEq)]
 pub struct Fragment<'a> {
     data: &'a [u8],
-    escape_sequence: Option<EscapeSequence<'a>>,
+    osc: Option<Osc<'a>>,
 }
 
 impl<'a> Fragment<'a> {
-    pub fn new(data: &'a [u8], escape_sequence: Option<EscapeSequence<'a>>) -> Self {
-        Self {
-            data,
-            escape_sequence,
-        }
+    pub fn new(data: &'a [u8], osc: Option<Osc<'a>>) -> Self {
+        Self { data, osc }
     }
 
     pub fn data(&self) -> &'a [u8] {
         self.data
     }
 
-    pub fn escape_sequence(&self) -> Option<&EscapeSequence<'a>> {
-        self.escape_sequence.as_ref()
+    pub fn osc(&self) -> Option<&Osc<'a>> {
+        self.osc.as_ref()
     }
 }
 
 #[derive(Debug, PartialEq)]
-pub enum EscapeSequence<'a> {
+pub enum Osc<'a> {
     ChangeIconNameAndWindowTitle(&'a [u8]),
     PostNotification(&'a [u8]),
     Incomplete,
@@ -85,24 +82,21 @@ impl<'a> Iterator for FragmentIterator<'a> {
         }
 
         let offset = *self.offset;
-        let mut emit = |consumed, escape_sequence| {
+        let mut emit = |consumed, osc| {
             debug_assert!(0 < consumed);
             debug_assert!(consumed <= remaining.len());
             *self.offset += consumed;
-            Some(Fragment::new(
-                &self.data[offset..*self.offset],
-                escape_sequence,
-            ))
+            Some(Fragment::new(&self.data[offset..*self.offset], osc))
         };
         let mut emit_incomplete = || {
             if self.full {
-                emit(remaining.len(), Some(EscapeSequence::Incomplete))
+                emit(remaining.len(), Some(Osc::Incomplete))
             } else {
                 None
             }
         };
 
-        match remaining.iter().position(|&b| b == b'\x1b') {
+        match remaining.windows(2).position(|w| w == b"\x1b]") {
             None => return emit(remaining.len(), None),
             Some(0) if remaining.len() < 2 => return emit_incomplete(),
             Some(0) => (),
@@ -110,48 +104,25 @@ impl<'a> Iterator for FragmentIterator<'a> {
         }
 
         debug_assert!(remaining.len() >= 2);
-        match remaining[1] {
-            b'[' => {
-                let terminator = remaining[2..]
-                    .iter()
-                    .position(|&b| (b'\x40'..=b'\x7e').contains(&b))
-                    .map(|i| 2 + i + 1);
-                let Some(n) = terminator else {
-                    return emit_incomplete();
-                };
-                emit(n, Some(EscapeSequence::Other))
-            }
-            b'\\' => emit(2, Some(EscapeSequence::Other)),
-            b']' => {
-                let bel = remaining[2..]
-                    .iter()
-                    .position(|&b| b == b'\x07')
-                    .map(|i| (2 + i, 1));
-                let st = || {
-                    remaining[2..]
-                        .windows(2)
-                        .position(|w| w == b"\x1b\\")
-                        .map(|i| (2 + i, 2))
-                };
-                let Some((parameter_end, terminator_length)) = bel.or_else(st) else {
-                    return emit_incomplete();
-                };
-                let n = parameter_end + terminator_length;
-                let p = || &remaining[4..parameter_end];
-                match &remaining[2..usize::min(4, parameter_end)] {
-                    b"0;" => emit(n, Some(EscapeSequence::ChangeIconNameAndWindowTitle(p()))),
-                    b"9;" => emit(n, Some(EscapeSequence::PostNotification(p()))),
-                    _ => emit(n, Some(EscapeSequence::Other)),
-                }
-            }
-            _ => {
-                let n = remaining[2..]
-                    .iter()
-                    .position(|&b| b == b'\x1b')
-                    .map(|i| 2 + i)
-                    .unwrap_or(remaining.len());
-                emit(n, None)
-            }
+        let bel = remaining[2..]
+            .iter()
+            .position(|&b| b == b'\x07')
+            .map(|i| (2 + i, 1));
+        let st = || {
+            remaining[2..]
+                .windows(2)
+                .position(|w| w == b"\x1b\\")
+                .map(|i| (2 + i, 2))
+        };
+        let Some((parameter_end, terminator_length)) = bel.or_else(st) else {
+            return emit_incomplete();
+        };
+        let n = parameter_end + terminator_length;
+        let p = || &remaining[4..parameter_end];
+        match &remaining[2..usize::min(4, parameter_end)] {
+            b"0;" => emit(n, Some(Osc::ChangeIconNameAndWindowTitle(p()))),
+            b"9;" => emit(n, Some(Osc::PostNotification(p()))),
+            _ => emit(n, Some(Osc::Other)),
         }
     }
 }
@@ -170,7 +141,7 @@ mod tests {
             buffer.drain().collect::<Vec<_>>(),
             vec![Fragment::new(
                 b"\x1b]0;Test Title\x07",
-                Some(EscapeSequence::ChangeIconNameAndWindowTitle(b"Test Title")),
+                Some(Osc::ChangeIconNameAndWindowTitle(b"Test Title")),
             )]
         );
     }
@@ -185,7 +156,7 @@ mod tests {
             buffer.drain().collect::<Vec<_>>(),
             vec![Fragment::new(
                 b"\x1b]0;Test Title\x1b\\",
-                Some(EscapeSequence::ChangeIconNameAndWindowTitle(b"Test Title")),
+                Some(Osc::ChangeIconNameAndWindowTitle(b"Test Title")),
             )]
         );
     }
@@ -198,7 +169,7 @@ mod tests {
             buffer.drain().collect::<Vec<_>>(),
             vec![Fragment::new(
                 b"\x1b]0;\x1b\\",
-                Some(EscapeSequence::ChangeIconNameAndWindowTitle(b"")),
+                Some(Osc::ChangeIconNameAndWindowTitle(b"")),
             )]
         );
     }
@@ -213,7 +184,7 @@ mod tests {
             buffer.drain().collect::<Vec<_>>(),
             vec![Fragment::new(
                 b"\x1b]9;Test Message\x07",
-                Some(EscapeSequence::PostNotification(b"Test Message")),
+                Some(Osc::PostNotification(b"Test Message")),
             )]
         );
     }
@@ -233,7 +204,7 @@ mod tests {
             buffer.drain().collect::<Vec<_>>(),
             vec![Fragment::new(
                 b"\x1b]0;Test Title\x07",
-                Some(EscapeSequence::ChangeIconNameAndWindowTitle(b"Test Title")),
+                Some(Osc::ChangeIconNameAndWindowTitle(b"Test Title")),
             )]
         );
     }
@@ -249,13 +220,13 @@ mod tests {
             buffer.drain().collect::<Vec<_>>(),
             vec![
                 Fragment::new(b"Test Text", None),
-                Fragment::new(b"\x1b]0;Test", Some(EscapeSequence::Incomplete)),
+                Fragment::new(b"\x1b]0;Test", Some(Osc::Incomplete)),
             ],
         );
         buffer.extend_from_read(&b" Title\x07"[..]).unwrap();
         assert_eq!(
             buffer.drain().collect::<Vec<_>>(),
-            vec![Fragment::new(b" Title\x07", None,)]
+            vec![Fragment::new(b" Title\x07", None)]
         );
     }
 
@@ -263,16 +234,11 @@ mod tests {
     fn other_escape_sequence() {
         let mut buffer = Buffer::<1024>::new();
         buffer
-            .extend_from_read(&b"  \x1b[31mTest Text\x1b[0m"[..])
+            .extend_from_read(&b"\x1b]4;0;#000000\x1b\\"[..])
             .unwrap();
         assert_eq!(
             buffer.drain().collect::<Vec<_>>(),
-            vec![
-                Fragment::new(b"  ", None),
-                Fragment::new(b"\x1b[31m", Some(EscapeSequence::Other)),
-                Fragment::new(b"Test Text", None),
-                Fragment::new(b"\x1b[0m", Some(EscapeSequence::Other)),
-            ],
+            vec![Fragment::new(b"\x1b]4;0;#000000\x1b\\", Some(Osc::Other))],
         );
     }
 }

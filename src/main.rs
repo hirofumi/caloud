@@ -1,5 +1,5 @@
 use crate::notification::{deliver_if_osc9_unsupported, set_global_delegate};
-use crate::tty_text::{Buffer, EscapeSequence};
+use crate::tty_text::{Buffer, Osc};
 use anyhow::Context;
 use nix::pty::{ForkptyResult, forkpty};
 use nix::sys::signal::{SigHandler, SigSet, Signal, signal};
@@ -61,14 +61,14 @@ fn intercept(child: Pid, master: OwnedFd) -> anyhow::Result<()> {
                 if stdout.write_all(fragment.data()).is_err() {
                     return;
                 }
-                match fragment.escape_sequence() {
-                    None | Some(EscapeSequence::Incomplete | EscapeSequence::Other) => {
+                match fragment.osc() {
+                    None | Some(Osc::Incomplete | Osc::Other) => {
                         continue;
                     }
-                    Some(EscapeSequence::ChangeIconNameAndWindowTitle(new_title)) => {
+                    Some(Osc::ChangeIconNameAndWindowTitle(new_title)) => {
                         title.replace_range(.., &String::from_utf8_lossy(new_title.trim_ascii()));
                     }
-                    Some(EscapeSequence::PostNotification(message)) => {
+                    Some(Osc::PostNotification(message)) => {
                         let message = String::from_utf8_lossy(message.trim_ascii()).into_owned();
                         let _ = notification_tx.try_send((title.clone(), message));
                     }
