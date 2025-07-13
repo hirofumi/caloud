@@ -206,6 +206,7 @@ impl<'a> Iterator for LineWrappingAdjuster<'a> {
                     .map(|i| offset + i)
                     .unwrap_or(data.len());
                 let mut url_cont = url_break;
+                let mut linebreak_found = false;
                 while url_cont < data.len() {
                     if data[url_cont..].starts_with(b"\x1b[") {
                         url_cont += 2;
@@ -217,7 +218,8 @@ impl<'a> Iterator for LineWrappingAdjuster<'a> {
                             url_cont += 1;
                         }
                         continue;
-                    } else if data[url_cont..].starts_with(b"\r\n  ") {
+                    } else if !linebreak_found && data[url_cont..].starts_with(b"\r\n  ") {
+                        linebreak_found = true;
                         url_cont += 4;
                         continue;
                     } else {
@@ -231,6 +233,13 @@ impl<'a> Iterator for LineWrappingAdjuster<'a> {
                     break;
                 }
                 gap_fragment = Some(Fragment::new(&data[url_break..url_cont], None));
+                if data[offset..].is_empty()
+                    || !data[offset].is_ascii_graphic()
+                    || data[offset..].starts_with(b"- ")
+                    || data[offset..].starts_with(b"-\r")
+                {
+                    break;
+                }
             }
             if offset == data.len() && !self.inner.has_next() && self.inner.step_back() {
                 return None;
@@ -361,7 +370,7 @@ mod tests {
 
     #[cfg(feature = "line-wrapping-adjustment")]
     #[test]
-    fn adjust_line_wrapping() {
+    fn adjust_line_wrapping_for_long_url() {
         let mut buffer = Buffer::<1024>::new();
         buffer
             .extend_from_read(
@@ -387,6 +396,53 @@ mod tests {
                 Fragment::new(b"\r\n  ", None),
                 Fragment::new(b" and some more text.", None),
             ]
+        );
+    }
+
+    #[cfg(feature = "line-wrapping-adjustment")]
+    #[test]
+    fn adjust_line_wrapping_for_unordered_list() {
+        let mut buffer = Buffer::<1024>::new();
+        buffer
+            .extend_from_read(
+                [
+                    &b"  - https://example.c"[..],
+                    &b"  om/1"[..],
+                    &b"  - https://example.c"[..],
+                    &b"  om/2"[..],
+                    &b"  -"[..],
+                    &b"  https://example.c"[..],
+                    &b"  om/3"[..],
+                    &b"  - https://example.c"[..],
+                    &b"  om/4"[..],
+                    &b"  "[..],
+                    &b"  some more text"[..],
+                ]
+                .join(&b"\r\n"[..])
+                .as_slice(),
+            )
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(
+                &buffer
+                    .drain()
+                    .adjust_line_wrapping()
+                    .map(|f| f.data)
+                    .collect::<Vec<_>>()
+                    .concat(),
+            ),
+            String::from_utf8_lossy(
+                &[
+                    &b"  - https://example.com/1"[..],
+                    &b"  - https://example.com/2"[..],
+                    &b"  -"[..],
+                    &b"  https://example.com/3"[..],
+                    &b"  - https://example.com/4"[..],
+                    &b"  "[..],
+                    &b"  some more text"[..],
+                ]
+                .join(&b"\r\n"[..]),
+            ),
         );
     }
 }
