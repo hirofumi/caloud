@@ -70,7 +70,7 @@ fn extract_line(fragments: &[Fragment], index: &mut usize) -> Option<Vec<u8>> {
             break;
         }
         if fragment.escape_sequence() == Some(&EscapeSequence::Other)
-            && fragment.data() == b"\x1b[?2026l"
+            && matches!(fragment.data(), b"\x1b[?25h" | b"\x1b[?2026l")
         {
             ok = true;
             break;
