@@ -1,5 +1,6 @@
 use crate::notification::{deliver_if_osc9_unsupported, set_global_delegate};
-use crate::tty_text::{Buffer, Osc};
+use crate::tty_text::buffer::Buffer;
+use crate::tty_text::fragment::EscapeSequence;
 use anyhow::Context;
 use nix::pty::{ForkptyResult, forkpty};
 use nix::sys::signal::{SigHandler, SigSet, Signal, signal};
@@ -14,6 +15,7 @@ use std::io::{self, Write};
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStringExt;
 use std::process::{Command, ExitStatus};
+use std::sync::atomic::AtomicU16;
 use std::thread;
 
 mod notification;
@@ -21,6 +23,8 @@ mod tty_text;
 
 const DEFAULT_NOTIFICATION_TITLE: &str = "Claude Code";
 const VOICE: &str = "Samantha";
+
+static TERMINAL_WIDTH: AtomicU16 = AtomicU16::new(0);
 
 fn main() -> anyhow::Result<()> {
     match unsafe { forkpty(None, None) }.context("forkpty() failed")? {
@@ -45,6 +49,8 @@ fn intercept(child: Pid, master: OwnedFd) -> anyhow::Result<()> {
     spawn_winsize_updater(master).context("spawn_winsize_updater")?;
     thread::spawn(move || io::copy(&mut io::stdin(), &mut writer));
 
+    debug_assert!(TERMINAL_WIDTH.load(std::sync::atomic::Ordering::Relaxed) > 0);
+
     let (notification_tx, notification_rx) = std::sync::mpsc::sync_channel::<(String, String)>(10);
 
     thread::spawn(move || {
@@ -57,27 +63,19 @@ fn intercept(child: Pid, master: OwnedFd) -> anyhow::Result<()> {
                 break;
             }
 
-            for fragment in {
-                #[cfg(feature = "line-wrapping-adjustment")]
-                {
-                    buffer.drain().adjust_line_wrapping()
-                }
-                #[cfg(not(feature = "line-wrapping-adjustment"))]
-                {
-                    buffer.drain()
-                }
-            } {
+            for fragment in buffer.parse(TERMINAL_WIDTH.load(std::sync::atomic::Ordering::Relaxed))
+            {
                 if stdout.write_all(fragment.data()).is_err() {
                     return;
                 }
-                match fragment.osc() {
-                    None | Some(Osc::Incomplete | Osc::Other) => {
+                match fragment.escape_sequence() {
+                    None | Some(EscapeSequence::Incomplete | EscapeSequence::Other) => {
                         continue;
                     }
-                    Some(Osc::ChangeIconNameAndWindowTitle(new_title)) => {
+                    Some(EscapeSequence::ChangeIconNameAndWindowTitle(new_title)) => {
                         title.replace_range(.., &String::from_utf8_lossy(new_title.trim_ascii()));
                     }
-                    Some(Osc::PostNotification(message)) => {
+                    Some(EscapeSequence::PostNotification(message)) => {
                         let message = String::from_utf8_lossy(message.trim_ascii()).into_owned();
                         let _ = notification_tx.try_send((title.clone(), message));
                     }
@@ -190,6 +188,8 @@ fn update_winsize<Fd: AsRawFd>(fd: &Fd) -> anyhow::Result<()> {
 
     unsafe { get_winsize(stdin, &mut winsize) }.context("get_winsize() failed")?;
     unsafe { set_winsize(fd, &winsize) }.context("set_winsize() failed")?;
+
+    TERMINAL_WIDTH.store(winsize.ws_col, std::sync::atomic::Ordering::Relaxed);
 
     Ok(())
 }

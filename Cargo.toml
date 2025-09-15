@@ -12,6 +12,10 @@ nix = { version = "0.30", default-features = false, features = ["ioctl", "proces
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSRunningApplication"] }
 objc2-foundation = { version = "0.3", features = ["NSUserNotification"] }
+unicode-width = "0.2"
+
+[dev-dependencies]
+indoc = "2"
 
 [profile.release]
 lto = true
