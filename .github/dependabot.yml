@@ -12,3 +12,7 @@ updates:
       interval: "monthly"
     cooldown:
       default-days: 14  
+  - package-ecosystem: "rust-toolchain"
+    directory: "/"
+    schedule:
+      interval: "monthly"
