@@ -65,15 +65,21 @@ fn extract_line(fragments: &[Fragment], index: &mut usize) -> Option<Vec<u8>> {
     let mut ok = false;
     while let Some(fragment) = fragments.get(i) {
         i += 1;
-        if fragment.is_plain_text() && fragment.data().contains(&b'\n') {
-            ok = true;
-            break;
-        }
-        if fragment.escape_sequence() == Some(&EscapeSequence::Other)
-            && matches!(fragment.data(), b"\x1b[?25h" | b"\x1b[?2026l")
-        {
-            ok = true;
-            break;
+        match fragment.escape_sequence() {
+            None if fragment.data().contains(&b'\n') => {
+                ok = true;
+                break;
+            }
+            Some(
+                &EscapeSequence::EndSynchronizedUpdate
+                | &EscapeSequence::ShowCursor
+                | &EscapeSequence::SetWindowAndIconTitle(_)
+                | &EscapeSequence::PostNotification(_),
+            ) => {
+                ok = true;
+                break;
+            }
+            None | Some(EscapeSequence::Incomplete | EscapeSequence::Other) => {}
         }
     }
     if ok {

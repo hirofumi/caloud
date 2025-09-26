@@ -83,7 +83,7 @@ impl<'a> Fragment<'a> {
                 emit(
                     parameter_end + terminator_length,
                     Some(match &data[2..usize::min(4, parameter_end)] {
-                        b"0;" => EscapeSequence::ChangeIconNameAndWindowTitle(p()),
+                        b"0;" => EscapeSequence::SetWindowAndIconTitle(p()),
                         b"9;" => EscapeSequence::PostNotification(p()),
                         _ => EscapeSequence::Other,
                     }),
@@ -101,10 +101,15 @@ impl<'a> Fragment<'a> {
                     0x40..0x5F => Some(2),
                     _ => find_length(0x30..=0x7E),
                 };
-                match found_length {
-                    Some(n) => emit(n, Some(EscapeSequence::Other)),
-                    None => emit_incomplete(),
-                }
+                let Some(n) = found_length else {
+                    return emit_incomplete();
+                };
+                let escape_sequence = match &data[..n] {
+                    b"\x1b[?2026l" => EscapeSequence::EndSynchronizedUpdate,
+                    b"\x1b[?25h" => EscapeSequence::ShowCursor,
+                    _ => EscapeSequence::Other,
+                };
+                emit(n, Some(escape_sequence))
             }
             n => emit(
                 data.iter()
@@ -165,9 +170,41 @@ impl std::fmt::Debug for Fragment<'_> {
 
 #[derive(Debug, PartialEq)]
 pub enum EscapeSequence<'a> {
-    ChangeIconNameAndWindowTitle(&'a [u8]),
+    /// `\x1b[?2026l`
+    ///
+    /// <https://gist.github.com/christianparpart/d8a62cc1ab659194337d73e399004036>
+    EndSynchronizedUpdate,
+
+    /// `\x1b[?25h`
+    ///
+    /// > ```
+    /// > CSI ? Pm h
+    /// >           DEC Private Mode Set (DECSET).
+    /// >             ...
+    /// >             Ps = 2 5  ⇒  Show cursor (DECTCEM), VT220.
+    /// > ```
+    ///
+    /// <https://www.invisible-island.net/xterm/ctlseqs/ctlseqs.html#h4-Functions-using-CSI-_-ordered-by-the-final-character-lparen-s-rparen:CSI-?-Pm-h:Ps-=-2-5.1EC4>
+    ShowCursor,
+
+    /// `\x1b]0;title\x07`
+    ///
+    /// <https://www.invisible-island.net/xterm/ctlseqs/ctlseqs.html#h3-Miscellaneous>
+    SetWindowAndIconTitle(&'a [u8]),
+
+    /// `\x1b]9;message\x07`
+    ///
+    /// > To post a notification:
+    /// >
+    /// > ```
+    /// > OSC 9 ; [Message content goes here] ST
+    /// > ```
+    ///
+    /// <https://iterm2.com/documentation-escape-codes.html>
     PostNotification(&'a [u8]),
+
     Incomplete,
+
     Other,
 }
 
@@ -181,7 +218,7 @@ mod tests {
             new_fragments(b"\x1b]0;Test Title\x07", false).into_inner(),
             &[Fragment::new(
                 b"\x1b]0;Test Title\x07",
-                Some(EscapeSequence::ChangeIconNameAndWindowTitle(b"Test Title")),
+                Some(EscapeSequence::SetWindowAndIconTitle(b"Test Title")),
             )],
         );
     }
@@ -192,7 +229,7 @@ mod tests {
             new_fragments(b"\x1b]0;Test Title\x1b\\", false).into_inner(),
             &[Fragment::new(
                 b"\x1b]0;Test Title\x1b\\",
-                Some(EscapeSequence::ChangeIconNameAndWindowTitle(b"Test Title")),
+                Some(EscapeSequence::SetWindowAndIconTitle(b"Test Title")),
             )],
         );
     }
@@ -203,7 +240,7 @@ mod tests {
             new_fragments(b"\x1b]0;\x1b\\", false).into_inner(),
             &[Fragment::new(
                 b"\x1b]0;\x1b\\",
-                Some(EscapeSequence::ChangeIconNameAndWindowTitle(b"")),
+                Some(EscapeSequence::SetWindowAndIconTitle(b"")),
             )],
         );
     }
