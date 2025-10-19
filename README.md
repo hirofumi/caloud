@@ -18,7 +18,7 @@ A wrapper for `claude` that adds Notification Center support and `say`-based voi
 ```bash
 git clone https://github.com/hirofumi/caloud.git
 cd caloud
-cargo install --path .
+cargo install --locked --path .
 ```
 
 ## Usage
