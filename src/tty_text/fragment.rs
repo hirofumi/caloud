@@ -48,13 +48,6 @@ impl<'a> Fragment<'a> {
             debug_assert!(consumed <= data.len());
             Some(Fragment::new(&data[..consumed], escape_sequence))
         };
-        let emit_incomplete = || {
-            if allow_incomplete {
-                emit(data.len(), Some(EscapeSequence::Incomplete))
-            } else {
-                None
-            }
-        };
 
         if data.is_empty() {
             return None;
@@ -64,60 +57,9 @@ impl<'a> Fragment<'a> {
             .position(|&b| b == b'\x1b')
             .unwrap_or(data.len())
         {
-            0 if data.len() < 2 => emit_incomplete(),
-            0 if data[1] == b']' => {
-                let bel = data[2..]
-                    .iter()
-                    .position(|&b| b == b'\x07')
-                    .map(|i| (2 + i, 1));
-                let st = || {
-                    data[2..]
-                        .windows(2)
-                        .position(|w| w == b"\x1b\\")
-                        .map(|i| (2 + i, 2))
-                };
-                let Some((parameter_end, terminator_length)) = bel.or_else(st) else {
-                    return emit_incomplete();
-                };
-                let p = || &data[4..parameter_end];
-                let has_conemu_osc9_param = || {
-                    // https://conemu.github.io/en/AnsiEscapeCodes.html#ConEmu_specific_OSC
-                    matches!(p(), b"5" | b"10" | b"12")
-                        || p()
-                            .splitn(2, |b| *b == b';')
-                            .next()
-                            .is_some_and(|s| s.iter().all(|b| b.is_ascii_digit()))
-                };
-                emit(
-                    parameter_end + terminator_length,
-                    Some(match &data[2..usize::min(4, parameter_end)] {
-                        b"0;" => EscapeSequence::SetWindowAndIconTitle(p()),
-                        b"9;" if !has_conemu_osc9_param() => EscapeSequence::PostNotification(p()),
-                        _ => EscapeSequence::Other,
-                    }),
-                )
-            }
             0 => {
-                let find_length = |final_bytes: RangeInclusive<u8>| {
-                    data[2..]
-                        .iter()
-                        .position(|b| final_bytes.contains(b))
-                        .map(|i| 2 + i + 1)
-                };
-                let found_length = match data[1] {
-                    b'[' => find_length(0x40..=0x7E),
-                    0x40..0x5F => Some(2),
-                    _ => find_length(0x30..=0x7E),
-                };
-                let Some(n) = found_length else {
-                    return emit_incomplete();
-                };
-                let escape_sequence = match &data[..n] {
-                    b"\x1b[?2026l" => EscapeSequence::EndSynchronizedUpdate,
-                    b"\x1b[?25h" => EscapeSequence::ShowCursor,
-                    _ => EscapeSequence::Other,
-                };
-                emit(n, Some(escape_sequence))
+                let (consumed, escape_sequence) = EscapeSequence::parse(data, allow_incomplete)?;
+                emit(consumed, Some(escape_sequence))
             }
             n => emit(
                 data.iter()
@@ -214,6 +156,80 @@ pub enum EscapeSequence<'a> {
     Incomplete,
 
     Other,
+}
+
+impl<'a> EscapeSequence<'a> {
+    fn parse(data: &'a [u8], allow_incomplete: bool) -> Option<(usize, Self)> {
+        if data.first() != Some(&b'\x1b') {
+            return None;
+        }
+
+        let emit_incomplete = || {
+            if allow_incomplete {
+                Some((data.len(), EscapeSequence::Incomplete))
+            } else {
+                None
+            }
+        };
+
+        if data.len() < 2 {
+            return emit_incomplete();
+        }
+
+        if data[1] == b']' {
+            let bel = data[2..]
+                .iter()
+                .position(|&b| b == b'\x07')
+                .map(|i| (2 + i, 1));
+            let st = || {
+                data[2..]
+                    .windows(2)
+                    .position(|w| w == b"\x1b\\")
+                    .map(|i| (2 + i, 2))
+            };
+            let Some((parameter_end, terminator_length)) = bel.or_else(st) else {
+                return emit_incomplete();
+            };
+            let p = || &data[4..parameter_end];
+            let has_conemu_osc9_parameter = || {
+                // https://conemu.github.io/en/AnsiEscapeCodes.html#ConEmu_specific_OSC
+                matches!(p(), b"5" | b"10" | b"12")
+                    || p()
+                        .splitn(2, |b| *b == b';')
+                        .next()
+                        .is_some_and(|s| s.iter().all(|b| b.is_ascii_digit()))
+            };
+            return Some((
+                parameter_end + terminator_length,
+                match &data[2..usize::min(4, parameter_end)] {
+                    b"0;" => EscapeSequence::SetWindowAndIconTitle(p()),
+                    b"9;" if !has_conemu_osc9_parameter() => EscapeSequence::PostNotification(p()),
+                    _ => EscapeSequence::Other,
+                },
+            ));
+        }
+
+        let find_length = |final_bytes: RangeInclusive<u8>| {
+            data[2..]
+                .iter()
+                .position(|b| final_bytes.contains(b))
+                .map(|i| 2 + i + 1)
+        };
+        let found_length = match data[1] {
+            b'[' => find_length(0x40..=0x7E),
+            0x40..0x5F => Some(2),
+            _ => find_length(0x30..=0x7E),
+        };
+        let Some(n) = found_length else {
+            return emit_incomplete();
+        };
+        let escape_sequence = match &data[..n] {
+            b"\x1b[?2026l" => EscapeSequence::EndSynchronizedUpdate,
+            b"\x1b[?25h" => EscapeSequence::ShowCursor,
+            _ => EscapeSequence::Other,
+        };
+        Some((n, escape_sequence))
+    }
 }
 
 #[cfg(test)]
