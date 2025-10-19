@@ -74,7 +74,7 @@ fn extract_line(fragments: &[Fragment], index: &mut usize) -> Option<Vec<u8>> {
                 &EscapeSequence::EndSynchronizedUpdate
                 | &EscapeSequence::ShowCursor
                 | &EscapeSequence::SetWindowAndIconTitle(_)
-                | &EscapeSequence::ShowDesktopNotification(_, _),
+                | &EscapeSequence::PostNotification(_),
             ) => {
                 ok = true;
                 break;

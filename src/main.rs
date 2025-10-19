@@ -1,4 +1,4 @@
-use crate::notification::{deliver_if_osc777_unsupported, set_global_delegate};
+use crate::notification::{deliver_if_osc9_unsupported, set_global_delegate};
 use crate::tty_text::buffer::Buffer;
 use crate::tty_text::fragment::EscapeSequence;
 use anyhow::Context;
@@ -21,6 +21,7 @@ use std::thread;
 mod notification;
 mod tty_text;
 
+const DEFAULT_NOTIFICATION_TITLE: &str = "Claude Code";
 const VOICE: &str = "Samantha";
 
 static TERMINAL_WIDTH: AtomicU16 = AtomicU16::new(0);
@@ -74,6 +75,7 @@ fn intercept(child: Pid, master: OwnedFd) -> anyhow::Result<()> {
 
     thread::spawn(move || {
         let mut stdout = io::stdout().lock();
+        let mut title = DEFAULT_NOTIFICATION_TITLE.to_string();
         let mut buffer = Buffer::<8192>::new();
 
         while let Ok(n) = buffer.extend_from_read(&mut reader) {
@@ -86,12 +88,21 @@ fn intercept(child: Pid, master: OwnedFd) -> anyhow::Result<()> {
                 if stdout.write_all(fragment.data()).is_err() {
                     return;
                 }
-                if let Some(EscapeSequence::ShowDesktopNotification(title, body)) =
-                    fragment.escape_sequence()
-                {
-                    let title = String::from_utf8_lossy(title.trim_ascii());
-                    let body = String::from_utf8_lossy(body.trim_ascii());
-                    let _ = notification_tx.try_send((title.into_owned(), body.into_owned()));
+                match fragment.escape_sequence() {
+                    Some(EscapeSequence::SetWindowAndIconTitle(new_title)) => {
+                        title.replace_range(.., &String::from_utf8_lossy(new_title.trim_ascii()));
+                    }
+                    Some(EscapeSequence::PostNotification(message)) => {
+                        let message = String::from_utf8_lossy(message.trim_ascii()).into_owned();
+                        let _ = notification_tx.try_send((title.clone(), message));
+                    }
+                    Some(
+                        EscapeSequence::EndSynchronizedUpdate
+                        | EscapeSequence::ShowCursor
+                        | EscapeSequence::Incomplete
+                        | EscapeSequence::Other,
+                    )
+                    | None => {}
                 }
             }
 
@@ -103,7 +114,7 @@ fn intercept(child: Pid, master: OwnedFd) -> anyhow::Result<()> {
 
     thread::spawn(move || {
         while let Ok((title, message)) = notification_rx.recv() {
-            let _ = deliver_if_osc777_unsupported(&title, &message);
+            let _ = deliver_if_osc9_unsupported(&title, &message);
             let _ = say(&message);
         }
     });
