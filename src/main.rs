@@ -26,17 +26,37 @@ const VOICE: &str = "Samantha";
 static TERMINAL_WIDTH: AtomicU16 = AtomicU16::new(0);
 
 fn main() -> anyhow::Result<()> {
+    if should_bypass_pty(std::env::args_os().skip(1)) {
+        let argv = build_argv();
+        execvp(&argv[0], &argv).context("execvp() failed")?;
+        unreachable!();
+    }
+
     match unsafe { forkpty(None, None) }.context("forkpty() failed")? {
         ForkptyResult::Child => {
-            let mut argv = vec![c"claude".to_owned()];
-            for arg in std::env::args_os().skip(1) {
-                argv.push(CString::new(arg.into_vec())?);
-            }
+            let argv = build_argv();
             execvp(&argv[0], &argv).context("execvp() failed")?;
             unreachable!();
         }
         ForkptyResult::Parent { child, master } => intercept(child, master),
     }
+}
+
+fn should_bypass_pty(mut args: impl Iterator<Item = std::ffi::OsString>) -> bool {
+    args.any(|arg| {
+        matches!(
+            arg.to_str(),
+            Some("-p" | "--print" | "-v" | "--version" | "-h" | "--help"),
+        )
+    })
+}
+
+fn build_argv() -> Vec<CString> {
+    let mut argv = vec![c"claude".to_owned()];
+    for arg in std::env::args_os().skip(1) {
+        argv.push(CString::new(arg.into_vec()).unwrap());
+    }
+    argv
 }
 
 fn intercept(child: Pid, master: OwnedFd) -> anyhow::Result<()> {
