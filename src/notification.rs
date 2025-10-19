@@ -61,8 +61,8 @@ pub fn set_global_delegate() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn deliver_if_osc9_unsupported(title: &str, message: &str) -> anyhow::Result<bool> {
-    if is_osc9_supported() {
+pub fn deliver_if_osc777_unsupported(title: &str, message: &str) -> anyhow::Result<bool> {
+    if is_osc777_supported() {
         return Ok(false);
     }
 
@@ -112,12 +112,11 @@ fn activate_application() -> bool {
     .unwrap_or_default()
 }
 
-fn is_osc9_supported() -> bool {
+fn is_osc777_supported() -> bool {
     const GHOSTTY: &str = "com.mitchellh.ghostty"; // https://ghostty.org/docs/config/reference#desktop-notifications
-    const ITERM2: &str = "com.googlecode.iterm2"; // https://iterm2.com/documentation-escape-codes.html
 
     unsafe { find_application().and_then(|app| app.bundleIdentifier()) }
-        .map(|bundle_identifier| matches!(bundle_identifier.to_string().as_str(), GHOSTTY | ITERM2))
+        .map(|bundle_identifier| bundle_identifier.to_string().as_str() == GHOSTTY)
         .unwrap_or_default()
 }
 

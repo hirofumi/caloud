@@ -79,13 +79,20 @@ impl<'a> Fragment<'a> {
                 let Some((parameter_end, terminator_length)) = bel.or_else(st) else {
                     return emit_incomplete();
                 };
-                let p = || &data[4..parameter_end];
                 emit(
                     parameter_end + terminator_length,
-                    Some(match &data[2..usize::min(4, parameter_end)] {
-                        b"0;" => EscapeSequence::SetWindowAndIconTitle(p()),
-                        b"9;" => EscapeSequence::PostNotification(p()),
-                        _ => EscapeSequence::Other,
+                    Some(if data.get(2..4) == Some(b"0;") {
+                        EscapeSequence::SetWindowAndIconTitle(&data[4..parameter_end])
+                    } else if data.get(2..13) == Some(b"777;notify;")
+                        && let title_and_body = &data[13..parameter_end]
+                        && let Some(semicolon) = title_and_body.iter().position(|&b| b == b';')
+                    {
+                        EscapeSequence::ShowDesktopNotification(
+                            &title_and_body[..semicolon],
+                            &title_and_body[semicolon + 1..],
+                        )
+                    } else {
+                        EscapeSequence::Other
                     }),
                 )
             }
@@ -192,16 +199,20 @@ pub enum EscapeSequence<'a> {
     /// <https://www.invisible-island.net/xterm/ctlseqs/ctlseqs.html#h3-Miscellaneous>
     SetWindowAndIconTitle(&'a [u8]),
 
-    /// `\x1b]9;message\x07`
+    /// `\x1b]777;notify;Title;Body\x07`
     ///
-    /// > To post a notification:
-    /// >
-    /// > ```
-    /// > OSC 9 ; [Message content goes here] ST
+    /// > ```zig
+    /// >     const input = "777;notify;Title;Body";
     /// > ```
     ///
-    /// <https://iterm2.com/documentation-escape-codes.html>
-    PostNotification(&'a [u8]),
+    /// <https://github.com/ghostty-org/ghostty/blob/v1.2.2/src/terminal/osc.zig#L2058-L2070>
+    ///
+    /// Note: caloud adopts OSC 777 to avoid confusion between iTerm2's OSC 9 and ConEmu's OSC 9;1-12.
+    ///
+    /// - <https://github.com/ghostty-org/ghostty/blob/v1.2.2/src/terminal/osc.zig#L370-L382>
+    /// - <https://iterm2.com/documentation-escape-codes.html>
+    /// - <https://conemu.github.io/en/AnsiEscapeCodes.html#OSC_Operating_system_commands>
+    ShowDesktopNotification(&'a [u8], &'a [u8]),
 
     Incomplete,
 
@@ -246,12 +257,23 @@ mod tests {
     }
 
     #[test]
-    fn post_notification_with_bel_terminator() {
+    fn show_desktop_notification_with_bel_terminator() {
         assert_eq!(
-            new_fragments(b"\x1b]9;Test Message\x07", false).into_inner(),
+            new_fragments(b"\x1b]777;notify;Title;Body\x07", false).into_inner(),
             &[Fragment::new(
-                b"\x1b]9;Test Message\x07",
-                Some(EscapeSequence::PostNotification(b"Test Message")),
+                b"\x1b]777;notify;Title;Body\x07",
+                Some(EscapeSequence::ShowDesktopNotification(b"Title", b"Body")),
+            )],
+        );
+    }
+
+    #[test]
+    fn show_desktop_notification_without_separator() {
+        assert_eq!(
+            new_fragments(b"\x1b]777;notify;NoSeparator\x07", false).into_inner(),
+            &[Fragment::new(
+                b"\x1b]777;notify;NoSeparator\x07",
+                Some(EscapeSequence::Other),
             )],
         );
     }
