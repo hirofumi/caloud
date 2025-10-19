@@ -80,11 +80,19 @@ impl<'a> Fragment<'a> {
                     return emit_incomplete();
                 };
                 let p = || &data[4..parameter_end];
+                let has_conemu_osc9_param = || {
+                    // https://conemu.github.io/en/AnsiEscapeCodes.html#ConEmu_specific_OSC
+                    matches!(p(), b"5" | b"10" | b"12")
+                        || p()
+                            .splitn(2, |b| *b == b';')
+                            .next()
+                            .is_some_and(|s| s.iter().all(|b| b.is_ascii_digit()))
+                };
                 emit(
                     parameter_end + terminator_length,
                     Some(match &data[2..usize::min(4, parameter_end)] {
                         b"0;" => EscapeSequence::SetWindowAndIconTitle(p()),
-                        b"9;" => EscapeSequence::PostNotification(p()),
+                        b"9;" if !has_conemu_osc9_param() => EscapeSequence::PostNotification(p()),
                         _ => EscapeSequence::Other,
                     }),
                 )
@@ -252,6 +260,17 @@ mod tests {
             &[Fragment::new(
                 b"\x1b]9;Test Message\x07",
                 Some(EscapeSequence::PostNotification(b"Test Message")),
+            )],
+        );
+    }
+
+    #[test]
+    fn conemu_set_progress_state() {
+        assert_eq!(
+            new_fragments(b"\x1b]9;4;1;50\x07", false).into_inner(),
+            &[Fragment::new(
+                b"\x1b]9;4;1;50\x07",
+                Some(EscapeSequence::Other)
             )],
         );
     }
