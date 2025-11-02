@@ -36,9 +36,7 @@ pub fn set_global_delegate() -> anyhow::Result<()> {
                 notification: &NSUserNotification,
             ) {
                 let _ = activate_application();
-                unsafe {
-                    center.removeDeliveredNotification(notification);
-                }
+                center.removeDeliveredNotification(notification);
             }
         }
     );
@@ -67,7 +65,7 @@ pub fn deliver_if_osc9_unsupported(title: &str, message: &str) -> anyhow::Result
     }
 
     #[expect(deprecated)]
-    unsafe {
+    {
         let notification = NSUserNotification::new();
         notification.setTitle(Some(&NSString::from_str(title)));
         notification.setInformativeText(Some(&NSString::from_str(message)));
@@ -101,33 +99,31 @@ fn swizzle_bundle_identifier() {
 }
 
 fn activate_application() -> bool {
-    unsafe {
-        find_application().map(|app| {
+    find_application()
+        .map(|app| {
             app.activateWithOptions(
                 #[expect(deprecated)]
                 NSApplicationActivationOptions::ActivateIgnoringOtherApps,
             )
         })
-    }
-    .unwrap_or_default()
+        .unwrap_or_default()
 }
 
 fn is_osc9_supported() -> bool {
     const GHOSTTY: &str = "com.mitchellh.ghostty"; // https://ghostty.org/docs/config/reference#desktop-notifications
     const ITERM2: &str = "com.googlecode.iterm2"; // https://iterm2.com/documentation-escape-codes.html
 
-    unsafe { find_application().and_then(|app| app.bundleIdentifier()) }
+    find_application()
+        .and_then(|app| app.bundleIdentifier())
         .map(|bundle_identifier| matches!(bundle_identifier.to_string().as_str(), GHOSTTY | ITERM2))
         .unwrap_or_default()
 }
 
 fn find_application() -> Option<Retained<NSRunningApplication>> {
-    unsafe {
-        iterate_ancestor_pids().find_map(|pid| {
-            NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
-                .filter(|app| app.bundleIdentifier().is_some())
-        })
-    }
+    iterate_ancestor_pids().find_map(|pid| {
+        NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+            .filter(|app| app.bundleIdentifier().is_some())
+    })
 }
 
 fn iterate_ancestor_pids() -> impl Iterator<Item = libc::pid_t> {
