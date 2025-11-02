@@ -6,6 +6,12 @@ updates:
       interval: "monthly"
     cooldown:
       default-days: 14  
+    groups:
+      objc2:
+        patterns:
+          - objc2
+          - objc2-app-kit
+          - objc2-foundation
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
