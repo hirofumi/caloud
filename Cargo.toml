@@ -3,15 +3,14 @@ name = "caloud"
 version = "0.1.0"
 edition = "2024"
 
-[features]
-line-wrapping-adjustment = []
-
 [dependencies]
 anyhow = "1"
+lexopt = "0.3"
 nix = { version = "0.30", default-features = false, features = ["ioctl", "process", "signal", "term"] }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSRunningApplication"] }
 objc2-foundation = { version = "0.3", features = ["NSUserNotification"] }
+shell-words = "1"
 unicode-width = "0.2"
 
 [dev-dependencies]

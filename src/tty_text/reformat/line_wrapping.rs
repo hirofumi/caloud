@@ -1,5 +1,3 @@
-#![cfg(feature = "line-wrapping-adjustment")]
-
 use crate::tty_text::fragment::{EscapeSequence, Fragment};
 
 const INDENT: &[u8] = b"  ";

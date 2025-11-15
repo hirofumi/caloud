@@ -29,10 +29,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "indoc",
+ "lexopt",
  "nix",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
+ "shell-words",
  "unicode-width",
 ]
 
@@ -63,6 +65,12 @@ name = "indoc"
 version = "2.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f4c7245a08504955605670dbf141fceab975f15ca21570696aebe9d2e71576bd"
+
+[[package]]
+name = "lexopt"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9fa0e2a1fcbe2f6be6c42e342259976206b383122fc152e872795338b5a3f3a7"
 
 [[package]]
 name = "libc"
@@ -233,6 +241,12 @@ dependencies = [
  "objc2",
  "objc2-foundation",
 ]
+
+[[package]]
+name = "shell-words"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24188a676b6ae68c3b2cb3a01be17fbf7240ce009799bb56d5b1409051e78fde"
 
 [[package]]
 name = "unicode-width"

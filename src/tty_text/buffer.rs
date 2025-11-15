@@ -1,4 +1,5 @@
 use crate::tty_text::fragment::{Fragment, FragmentList};
+use crate::tty_text::reformat::Reformatter;
 
 #[derive(Debug, PartialEq)]
 pub struct Buffer<const N: usize> {
@@ -20,26 +21,11 @@ impl<const N: usize> Buffer<N> {
         self.start == 0 && self.end == N
     }
 
-    pub fn parse(&mut self, terminal_width: u16) -> Vec<Fragment<'_>> {
+    pub fn read_fragments(&mut self, formatter: &Reformatter) -> Vec<Fragment<'_>> {
         let fragments = FragmentList::parse(&self.data[self.start..self.end], self.is_full());
-
-        #[cfg(feature = "line-wrapping-adjustment")]
-        {
-            let _ = fragments.size();
-            let mut fragments = fragments.into_inner();
-            self.start += crate::tty_text::line_wrapping::adjust_line_wrapping(
-                &mut fragments,
-                self.is_full(),
-                terminal_width,
-            );
-            fragments
-        }
-        #[cfg(not(feature = "line-wrapping-adjustment"))]
-        {
-            let _ = terminal_width;
-            self.start += fragments.size();
-            fragments.into_inner()
-        }
+        let (consumed, fragments) = formatter.reformat(fragments, self.is_full());
+        self.start += consumed;
+        fragments
     }
 
     pub fn extend_from_read(&mut self, mut r: impl std::io::Read) -> std::io::Result<usize> {

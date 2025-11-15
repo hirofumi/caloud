@@ -1,3 +1,3 @@
 pub mod buffer;
 pub mod fragment;
-mod line_wrapping;
+pub mod reformat;

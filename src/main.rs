@@ -1,66 +1,48 @@
-use crate::notification::{deliver_if_osc9_unsupported, set_global_delegate};
+use crate::runtime::Runtime;
 use crate::tty_text::buffer::Buffer;
 use crate::tty_text::fragment::EscapeSequence;
 use anyhow::Context;
+use macos::notification::{deliver_if_osc9_unsupported, set_global_delegate};
 use nix::pty::{ForkptyResult, forkpty};
 use nix::sys::signal::{SigHandler, SigSet, Signal, signal};
 use nix::sys::termios::{SetArg, Termios, cfmakeraw, tcgetattr, tcsetattr};
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
-use nix::unistd::{Pid, execvp};
+use nix::unistd::Pid;
 use nix::{ioctl_read_bad, ioctl_write_ptr_bad};
 use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSRunLoop};
-use std::ffi::CString;
+use std::convert::Infallible;
 use std::fs::File;
 use std::io::{self, Write};
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
-use std::os::unix::ffi::OsStringExt;
-use std::process::{Command, ExitStatus};
 use std::sync::atomic::AtomicU16;
 use std::thread;
 
-mod notification;
+mod args;
+mod claude;
+mod macos;
+mod runtime;
 mod tty_text;
 
 const DEFAULT_NOTIFICATION_TITLE: &str = "Claude Code";
-const VOICE: &str = "Samantha";
 
 static TERMINAL_WIDTH: AtomicU16 = AtomicU16::new(0);
 
-fn main() -> anyhow::Result<()> {
-    if should_bypass_pty(std::env::args_os().skip(1)) {
-        let argv = build_argv();
-        execvp(&argv[0], &argv).context("execvp() failed")?;
-        unreachable!();
+fn main() -> anyhow::Result<Infallible> {
+    let runtime = args::Arguments::parse()?.try_into_runtime()?;
+
+    if runtime.claude_command.should_bypass_pty() {
+        runtime.claude_command.exec()?;
     }
 
     match unsafe { forkpty(None, None) }.context("forkpty() failed")? {
-        ForkptyResult::Child => {
-            let argv = build_argv();
-            execvp(&argv[0], &argv).context("execvp() failed")?;
-            unreachable!();
+        ForkptyResult::Child => runtime.claude_command.exec(),
+        ForkptyResult::Parent { child, master } => {
+            std::process::exit(intercept(child, master, runtime)?)
         }
-        ForkptyResult::Parent { child, master } => intercept(child, master),
     }
 }
 
-fn should_bypass_pty(mut args: impl Iterator<Item = std::ffi::OsString>) -> bool {
-    args.any(|arg| {
-        matches!(
-            arg.to_str(),
-            Some("-p" | "--print" | "-v" | "--version" | "-h" | "--help"),
-        )
-    })
-}
-
-fn build_argv() -> Vec<CString> {
-    let mut argv = vec![c"claude".to_owned()];
-    for arg in std::env::args_os().skip(1) {
-        argv.push(CString::new(arg.into_vec()).unwrap());
-    }
-    argv
-}
-
-fn intercept(child: Pid, master: OwnedFd) -> anyhow::Result<()> {
+fn intercept(child: Pid, master: OwnedFd, mut runtime: Runtime) -> anyhow::Result<i32> {
     let _termios = try_make_raw(io::stdin()).context("try_make_raw")?;
     let mut reader = File::from(master.try_clone()?);
     let mut writer = File::from(master.try_clone()?);
@@ -83,8 +65,10 @@ fn intercept(child: Pid, master: OwnedFd) -> anyhow::Result<()> {
                 break;
             }
 
-            for fragment in buffer.parse(TERMINAL_WIDTH.load(std::sync::atomic::Ordering::Relaxed))
-            {
+            runtime
+                .reformatter
+                .set_terminal_width(TERMINAL_WIDTH.load(std::sync::atomic::Ordering::Relaxed));
+            for fragment in buffer.read_fragments(&runtime.reformatter) {
                 if stdout.write_all(fragment.data()).is_err() {
                     return;
                 }
@@ -112,10 +96,13 @@ fn intercept(child: Pid, master: OwnedFd) -> anyhow::Result<()> {
         }
     });
 
+    let say_command = runtime.say_command;
     thread::spawn(move || {
         while let Ok((title, message)) = notification_rx.recv() {
             let _ = deliver_if_osc9_unsupported(&title, &message);
-            let _ = say(&message);
+            if let Some(say_command) = &say_command {
+                let _ = say_command.run(&message);
+            }
         }
     });
 
@@ -130,7 +117,7 @@ fn intercept(child: Pid, master: OwnedFd) -> anyhow::Result<()> {
         let run_loop = NSRunLoop::mainRunLoop();
         loop {
             match exit_rx.try_recv() {
-                Ok(Ok(WaitStatus::Exited(_, 0))) => return Ok(()),
+                Ok(Ok(WaitStatus::Exited(_, code))) => return Ok(code),
                 Ok(Ok(status)) => anyhow::bail!("claude did not exit normally: {:?}", status),
                 Ok(Err(e)) => anyhow::bail!(e),
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -158,15 +145,6 @@ fn try_make_raw<Fd: AsFd>(fd: Fd) -> anyhow::Result<TermiosGuard<Fd>> {
     cfmakeraw(&mut new_termios);
     tcsetattr(fd.as_fd(), SetArg::TCSANOW, &new_termios).context("tcsetattr() failed")?;
     Ok(TermiosGuard(fd, termios))
-}
-
-fn say(message: &str) -> anyhow::Result<ExitStatus> {
-    Command::new("say")
-        .arg("-v")
-        .arg(VOICE)
-        .arg(message)
-        .status()
-        .context("Command::status() failed")
 }
 
 fn spawn_winsize_updater<Fd: AsRawFd + Send + Sync + 'static>(fd: Fd) -> anyhow::Result<()> {

@@ -85,7 +85,6 @@ impl<'a> Fragment<'a> {
     }
 }
 
-#[cfg(feature = "line-wrapping-adjustment")]
 impl<'a> Fragment<'a> {
     pub fn is_plain_text(&self) -> bool {
         self.escape_sequence.is_none()
