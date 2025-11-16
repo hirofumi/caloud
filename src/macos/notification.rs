@@ -1,3 +1,4 @@
+use crate::macos::sys_proc_info::{PROC_PIDT_SHORTBSDINFO, proc_bsdshortinfo};
 use anyhow::bail;
 use nix::libc;
 use objc2::ffi::{class_getInstanceMethod, method_exchangeImplementations};
@@ -135,34 +136,16 @@ fn getppid_of(pid: libc::pid_t) -> Option<libc::pid_t> {
         return None;
     }
 
-    #[repr(C)]
-    struct proc_bsdshortinfo {
-        pbsi_pid: u32,
-        pbsi_ppid: u32,
-        pbsi_pgid: u32,
-        pbsi_status: u32,
-        pbsi_comm: [u8; libc::MAXCOMLEN],
-        pbsi_flags: u32,
-        pbsi_uid: libc::uid_t,
-        pbsi_gid: libc::gid_t,
-        pbsi_ruid: libc::uid_t,
-        pbsi_rgid: libc::gid_t,
-        pbsi_svuid: libc::uid_t,
-        pbsi_svgid: libc::gid_t,
-        pbsi_rfu: u32,
-    }
-    const PROC_PIDT_SHORTBSDINFO: libc::c_int = 13;
-    const PROC_PIDT_SHORTBSDINFO_SIZE: libc::c_int = size_of::<proc_bsdshortinfo>() as _;
     unsafe {
         let mut info = mem::zeroed::<proc_bsdshortinfo>();
         let ret = libc::proc_pidinfo(
             pid,
-            PROC_PIDT_SHORTBSDINFO,
+            PROC_PIDT_SHORTBSDINFO as libc::c_int,
             0,
             &mut info as *mut _ as *mut _,
-            PROC_PIDT_SHORTBSDINFO_SIZE,
+            size_of::<proc_bsdshortinfo>() as libc::c_int,
         );
-        (ret == PROC_PIDT_SHORTBSDINFO_SIZE).then_some(info.pbsi_ppid as libc::pid_t)
+        (ret == size_of::<proc_bsdshortinfo>() as _).then_some(info.pbsi_ppid as libc::pid_t)
     }
 }
 

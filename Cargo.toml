@@ -16,5 +16,8 @@ unicode-width = "0.2"
 [dev-dependencies]
 indoc = "2"
 
+[build-dependencies]
+bindgen = "0.72"
+
 [profile.release]
 lto = true
