@@ -106,21 +106,13 @@ fn intercept(child: Pid, master: OwnedFd, mut runtime: Runtime) -> anyhow::Resul
         }
     });
 
-    let (exit_tx, exit_rx) = std::sync::mpsc::channel();
-
-    thread::spawn(move || {
-        let status = waitpid(child, Some(WaitPidFlag::empty()));
-        let _ = exit_tx.send(status);
-    });
-
     unsafe {
         let run_loop = NSRunLoop::mainRunLoop();
         loop {
-            match exit_rx.try_recv() {
-                Ok(Ok(WaitStatus::Exited(_, code))) => return Ok(code),
-                Ok(Ok(status)) => anyhow::bail!("claude did not exit normally: {:?}", status),
-                Ok(Err(e)) => anyhow::bail!(e),
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::Exited(_, code)) => return Ok(code),
+                Ok(WaitStatus::StillAlive) => {}
+                Ok(status) => anyhow::bail!("claude did not exit normally: {status:?}"),
                 Err(e) => anyhow::bail!(e),
             }
             run_loop.runMode_beforeDate(
