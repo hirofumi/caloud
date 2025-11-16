@@ -111,8 +111,9 @@ fn intercept(child: Pid, master: OwnedFd, mut runtime: Runtime) -> anyhow::Resul
         loop {
             match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
                 Ok(WaitStatus::Exited(_, code)) => return Ok(code),
+                Ok(WaitStatus::Signaled(_, signal, _)) => return Ok(128 + signal as i32),
                 Ok(WaitStatus::StillAlive) => {}
-                Ok(status) => anyhow::bail!("claude did not exit normally: {status:?}"),
+                Ok(status) => anyhow::bail!("unexpected status: {status:?}"),
                 Err(e) => anyhow::bail!(e),
             }
             run_loop.runMode_beforeDate(
