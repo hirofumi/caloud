@@ -15,7 +15,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: /.github/workflows/*.yml
           sparse-checkout-cone-mode: false
-      - uses: hirofumi/run-actionlint@ee50a31845315709b1bd54dcfe2a645c7cf9996a # v1.7.7
+      - uses: hirofumi/run-actionlint@867dde26404c6bd411c11ac6ecb5e0f4c0e9ac1e # v1.7.8
   cargo:
     runs-on: macos-latest
     env:
