@@ -145,7 +145,17 @@ fn can_follow_wrapped(line: &[u8]) -> bool {
         return false;
     }
 
+    if starts_with_url_scheme(&line[LEFT_MARGIN..]) {
+        return false;
+    }
+
     line[LEFT_MARGIN].is_ascii_graphic()
+}
+
+fn starts_with_url_scheme(line: &[u8]) -> bool {
+    line.iter()
+        .position(|&b| !(b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.')))
+        .is_some_and(|i| line[0].is_ascii_alphabetic() && line[i..].starts_with(b"://"))
 }
 
 fn can_be_wrapped_again(line: &[u8], terminal_width: u16) -> bool {
@@ -211,6 +221,25 @@ mod tests {
                   https://example.com
                   - https://example.com/4
             "}
+        );
+    }
+
+    #[test]
+    fn url_lines() {
+        assert_eq!(
+            make_adjusted_string(
+                indoc! {b"
+                    \xE2\x8F\xBA https://example.c
+                      om/aaa
+                      https://example.c
+                      om/bbb
+                "},
+                18,
+            ),
+            indoc! {"
+                ⏺ https://example.com/aaa
+                  https://example.com/bbb
+            "},
         );
     }
 
