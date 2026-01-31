@@ -8,6 +8,7 @@ use std::ffi::OsString;
 
 #[derive(Debug)]
 pub struct Arguments {
+    notification_center_delivery_enabled: bool,
     say_args: Option<OsString>,
     line_wrap_mode: LineWrapMode,
     claude_argv: Vec<OsString>,
@@ -20,6 +21,7 @@ impl Arguments {
 
     pub fn try_into_runtime(self) -> anyhow::Result<Runtime> {
         Ok(Runtime {
+            notification_center_delivery_enabled: self.notification_center_delivery_enabled,
             say_command: self.say_args.map(Self::try_build_say_command).transpose()?,
             reformatter: Reformatter::new(0, self.line_wrap_mode),
             claude_command: Self::try_build_claude_command(self.claude_argv)?,
@@ -45,6 +47,7 @@ impl Arguments {
 }
 
 fn parse_args(args: impl IntoIterator<Item = impl Into<OsString>>) -> anyhow::Result<Arguments> {
+    let mut notification_center_delivery_enabled = false;
     let mut say_args = None;
     let mut line_wrap_mode = LineWrapMode::Preserve;
     let mut claude_argv: Vec<OsString> = Vec::new();
@@ -52,6 +55,9 @@ fn parse_args(args: impl IntoIterator<Item = impl Into<OsString>>) -> anyhow::Re
     let mut parser = lexopt::Parser::from_iter(args);
     while let Some(arg) = parser.next()? {
         match arg {
+            Long("notification-center") => {
+                notification_center_delivery_enabled = true;
+            }
             Long("say") => {
                 say_args = Some(parser.value()?);
             }
@@ -71,6 +77,7 @@ fn parse_args(args: impl IntoIterator<Item = impl Into<OsString>>) -> anyhow::Re
     }
 
     Ok(Arguments {
+        notification_center_delivery_enabled,
         say_args,
         line_wrap_mode,
         claude_argv,
@@ -84,8 +91,15 @@ mod tests {
     #[test]
     fn default_values() {
         let arguments = parse_args(["prog"]).unwrap();
+        assert!(!arguments.notification_center_delivery_enabled);
         assert!(arguments.say_args.is_none());
         assert_eq!(arguments.line_wrap_mode, LineWrapMode::Preserve);
+    }
+
+    #[test]
+    fn notification_center_option() {
+        let arguments = parse_args(["prog", "--notification-center"]).unwrap();
+        assert!(arguments.notification_center_delivery_enabled);
     }
 
     #[test]

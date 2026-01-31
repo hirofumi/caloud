@@ -96,10 +96,13 @@ fn intercept(child: Pid, master: OwnedFd, mut runtime: Runtime) -> anyhow::Resul
         }
     });
 
+    let notification_center_delivery_enabled = runtime.notification_center_delivery_enabled;
     let say_command = runtime.say_command;
     thread::spawn(move || {
         while let Ok((title, message)) = notification_rx.recv() {
-            let _ = deliver_if_osc9_unsupported(&title, &message);
+            if notification_center_delivery_enabled {
+                let _ = deliver_if_osc9_unsupported(&title, &message);
+            }
             if let Some(say_command) = &say_command {
                 let _ = say_command.run(&message);
             }

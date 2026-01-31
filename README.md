@@ -28,6 +28,8 @@ caloud [OPTIONS] -- [CLAUDE_PATH] [CLAUDE_ARGS...]
 
 ### Options
 
+- `--notification-center`: Enable Notification Center delivery for terminals without OSC 9 support
+  - If not specified, Notification Center delivery is disabled
 - `--say=<ARGS>`: Enable voice notifications with `say` command arguments
   - Example: `--say='-v Samantha -r 200'`
   - If not specified, voice notifications are disabled
