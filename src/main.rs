@@ -19,6 +19,7 @@ use std::thread;
 
 mod args;
 mod claude;
+mod input_rewrite;
 mod macos;
 mod runtime;
 mod tty_text;
@@ -49,7 +50,8 @@ fn intercept(child: Pid, master: OwnedFd, mut runtime: Runtime) -> anyhow::Resul
 
     set_global_delegate().context("set_global_delegate")?;
     spawn_winsize_updater(master).context("spawn_winsize_updater")?;
-    thread::spawn(move || io::copy(&mut io::stdin(), &mut writer));
+    let mut input_rewriter = runtime.input_rewriter;
+    thread::spawn(move || input_rewriter.rewrite(&mut io::stdin(), &mut writer));
 
     debug_assert!(TERMINAL_WIDTH.load(std::sync::atomic::Ordering::Relaxed) > 0);
 

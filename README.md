@@ -33,6 +33,9 @@ caloud [OPTIONS] -- [CLAUDE_PATH] [CLAUDE_ARGS...]
 - `--say=<ARGS>`: Enable voice notifications with `say` command arguments
   - Example: `--say='-v Samantha -r 200'`
   - If not specified, voice notifications are disabled
+- `--input-rewrite=<RULE>`: Rewrite input bytes (`FROM:TO` format, can be repeated)
+  - Example (<kbd>Ctrl+B</kbd> → <kbd>Left</kbd>): `--input-rewrite='\x02:\e[D'`
+  - Example (<kbd>Alt+B</kbd> → <kbd>Ctrl+B</kbd>): `--input-rewrite='\x1bb:\x02'` 
 - `--line-wrap=<MODE>`: Control line wrapping adjustment (default: `preserve`)
   - `adjust`: Rejoin URLs split by `claude`'s line wrapping using heuristics
   - `preserve`: Keep original line breaks as-is
