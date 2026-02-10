@@ -1,0 +1,7 @@
+---
+source: src/tty_text/reformat/line_wrapping.rs
+expression: output
+input_file: src/tty_text/reformat/snapshots/ordered.capture.raw
+extension: raw
+snapshot_kind: binary
+---

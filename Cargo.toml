@@ -15,6 +15,7 @@ unicode-width = "0.2"
 
 [dev-dependencies]
 indoc = "2"
+insta = { version = "1.46", features = ["glob"] }
 proptest = { version = "1.9", features = ["attr-macro"] }
 
 [build-dependencies]

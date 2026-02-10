@@ -90,16 +90,36 @@ impl<'a> Fragment<'a> {
         self.escape_sequence.is_none()
     }
 
-    pub fn chomp(&mut self) {
-        let n = self.data.len();
-        if n >= 2 && &self.data[n - 2..n] == b"\r\n" {
-            self.data = &self.data[..n - 2];
-        } else if n >= 1 && self.data[n - 1] == b'\n' {
-            self.data = &self.data[..n - 1];
+    /// CSI Ps B — Cursor Down (CUD)
+    pub(super) fn is_cud(&self) -> bool {
+        self.data.len() >= 3
+            && self.data.starts_with(b"\x1b[")
+            && self.data[2..self.data.len() - 1]
+                .iter()
+                .all(|b| b.is_ascii_digit())
+            && self.data[self.data.len() - 1] == b'B'
+    }
+
+    /// CSI Ps C — Cursor Forward (CUF)
+    pub(super) fn is_cuf(&self) -> bool {
+        self.data.len() >= 3
+            && self.data.starts_with(b"\x1b[")
+            && self.data[2..self.data.len() - 1]
+                .iter()
+                .all(|b| b.is_ascii_digit())
+            && self.data[self.data.len() - 1] == b'C'
+    }
+
+    pub(super) fn chomp(&mut self) {
+        if let Some(rest) = self.data.strip_suffix(b"\n") {
+            self.data = rest;
+        }
+        while let Some(rest) = self.data.strip_suffix(b"\r") {
+            self.data = rest;
         }
     }
 
-    pub fn ltrim(&mut self) {
+    pub(super) fn ltrim(&mut self) {
         if let Some(i) = self.data.iter().position(|b| *b != b' ') {
             self.data = &self.data[i..];
         } else {

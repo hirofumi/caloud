@@ -1,0 +1,108 @@
+#!/usr/bin/expect -f
+
+# Capture Claude Code PTY output for line-wrapping test fixtures.
+# Each input file is fed to a fresh Claude Code session under a 40-column PTY.
+# The raw PTY bytes between the BEGINCAPTURE and ENDCAPTURE markers in the
+# response are saved via expect_out(buffer).
+#
+# Usage:
+#   expect capture.exp            # capture all inputs
+#   expect capture.exp bare       # capture only bare.md
+
+set timeout 30
+set basedir [file dirname [file normalize [info script]]]
+
+# Common instructions prepended to every input.
+set preamble "This is a rendering test. Output ONLY what is explicitly instructed below — no explanations, commentary, or extra text.
+
+Print the following text exactly as given:
+
+"
+
+# Determine which inputs to process.
+if {$argc > 0} {
+    set inputs {}
+    foreach name $argv {
+        set path [file join $basedir $name.md]
+        if {![file exists $path]} {
+            puts stderr "ERROR: $path does not exist"
+            exit 1
+        }
+        lappend inputs $path
+    }
+} else {
+    # Exclude uppercase files (e.g. CLAUDE.md, AGENTS.md) which are not test inputs
+    set inputs [lsort [glob [file join $basedir {[a-z]*.md}]]]
+}
+
+# Set PTY geometry for all spawned processes.  Rows is set large enough
+# to prevent scrolling, which would inject cursor-movement sequences
+# unrelated to line wrapping.
+set stty_init "rows 1000 columns 40"
+
+foreach input $inputs {
+    set name [file rootname [file tail $input]]
+    set outfile [file join $basedir $name.capture.raw]
+    set body [string trimright [read [open $input r]]]
+    # The epilogue instructs the model to bracket its output with
+    # BEGINCAPTURE / ENDCAPTURE markers so that the expect script can
+    # skip the thinking spinner and capture only the rendered content.
+    set epilogue "\n\nFirst print BEGINCAPTURE on its own line, then the text above exactly as given, then ENDCAPTURE on its own line."
+    set prompt_text "${preamble}${body}${epilogue}"
+
+    puts "=== Capturing: $name ==="
+
+    # Pass the prompt as a CLI argument so Claude Code submits it
+    # immediately on startup.  This avoids the unreliable Alt+Enter
+    # multi-line typing approach.
+    spawn claude --model haiku $prompt_text
+
+    # The prompt text is echoed in the user-message box, so both markers
+    # appear in the PTY stream twice: once in the echo and once in the
+    # response.  The first expect skips past the echo (ENDCAPTURE is the
+    # last marker mentioned in the prompt, so matching it consumes the
+    # entire echo including the BEGINCAPTURE mention).  The second expect
+    # skips the thinking spinner by waiting for BEGINCAPTURE in the
+    # response.  The third captures from there through ENDCAPTURE.
+    expect {
+        "ENDCAPTURE" {}
+        timeout {
+            puts "=== ERROR: timeout waiting for ENDCAPTURE echo for $name ==="
+            continue
+        }
+    }
+    expect {
+        "BEGINCAPTURE" {}
+        timeout {
+            puts "=== ERROR: timeout waiting for BEGINCAPTURE response for $name ==="
+            continue
+        }
+    }
+    expect {
+        "ENDCAPTURE" {
+            set captured $expect_out(buffer)
+            set fd [open $outfile w]
+            fconfigure $fd -translation binary
+            puts -nonewline $fd $captured
+            close $fd
+            puts "=== OK: $outfile ([string length $captured] bytes) ==="
+        }
+        timeout {
+            puts "=== ERROR: timeout waiting for ENDCAPTURE response for $name ==="
+        }
+    }
+
+    # Give Claude a moment to finish rendering after the marker.
+    sleep 2
+
+    # Send /exit to cleanly terminate the session.
+    send -- "/exit\r"
+
+    # Wait for the process to exit.
+    expect eof
+
+    # Brief pause between sessions.
+    sleep 1
+}
+
+puts "=== All captures complete ==="
