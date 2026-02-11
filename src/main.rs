@@ -52,7 +52,7 @@ fn intercept(child: Pid, master: OwnedFd, mut runtime: Runtime) -> anyhow::Resul
     spawn_winsize_updater(master).context("spawn_winsize_updater")?;
     let mut input_rewriter = runtime.input_rewriter;
     thread::spawn(move || {
-        let _ = input_rewriter.rewrite(nix::libc::STDIN_FILENO, &mut writer);
+        let _ = input_rewriter.rewrite(io::stdin().as_fd(), &mut writer);
     });
 
     debug_assert!(TERMINAL_WIDTH.load(std::sync::atomic::Ordering::Relaxed) > 0);

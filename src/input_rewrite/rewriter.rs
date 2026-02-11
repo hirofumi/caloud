@@ -1,7 +1,9 @@
 use super::rule::RewriteRule;
+use nix::errno::Errno;
+use nix::poll::{PollFd, PollFlags};
 use std::collections::HashSet;
 use std::io::{self, Write};
-use std::os::fd::RawFd;
+use std::os::fd::BorrowedFd;
 use std::time::Duration;
 
 /// Default timeout for flushing pending prefix bytes (ESC ambiguity resolution)
@@ -35,60 +37,46 @@ impl InputRewriter {
     /// Read from `fd` and write rewritten output to `writer`, using poll(2)
     /// to resolve prefix ambiguity via timeout.
     ///
-    /// `fd` must not be wrapped in a buffered reader (e.g. `std::io::Stdin`),
-    /// because its internal buffer would hide data from poll(2).
-    pub fn rewrite<W: Write>(&mut self, fd: RawFd, writer: &mut W) -> io::Result<()> {
-        let mut pfd = nix::libc::pollfd {
-            fd,
-            events: nix::libc::POLLIN,
-            revents: 0,
-        };
+    /// The underlying file descriptor must not also be read through a buffered
+    /// reader (e.g. `std::io::Stdin`), because its internal buffer would hide
+    /// data from poll(2).
+    pub fn rewrite<W: Write>(&mut self, fd: BorrowedFd<'_>, writer: &mut W) -> io::Result<()> {
+        let mut pfd = PollFd::new(fd, PollFlags::POLLIN);
         let mut buf = [0u8; 4096];
 
         loop {
-            let timeout = if self.has_pending() {
-                self.pending_timeout.as_millis().min(i32::MAX as u128) as i32
+            let timeout: Option<u16> = if self.has_pending() {
+                Some(self.pending_timeout.as_millis().min(u16::MAX as u128) as u16)
             } else {
-                -1
+                None
             };
 
-            pfd.revents = 0;
-            let poll_ret = unsafe { nix::libc::poll(&mut pfd, 1, timeout) };
-
-            if poll_ret < 0 {
-                let err = io::Error::last_os_error();
-                if err.kind() == io::ErrorKind::Interrupted {
+            match nix::poll::poll(std::slice::from_mut(&mut pfd), timeout) {
+                Ok(0) => {
+                    // Timeout: flush pending bytes without waiting for longer matches
+                    self.drain(writer, true)?;
+                    writer.flush()?;
                     continue;
                 }
-                return Err(err);
+                Ok(_) => {}
+                Err(Errno::EINTR) => continue,
+                Err(e) => return Err(e.into()),
             }
 
-            if poll_ret == 0 {
-                // Timeout: flush pending bytes without waiting for longer matches
-                self.drain(writer, true)?;
-                writer.flush()?;
-                continue;
-            }
-
-            let n = unsafe { nix::libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-
-            if n < 0 {
-                let err = io::Error::last_os_error();
-                if err.kind() == io::ErrorKind::Interrupted {
-                    continue;
+            match nix::unistd::read(fd, &mut buf) {
+                Ok(0) => {
+                    self.drain(writer, true)?;
+                    writer.flush()?;
+                    return Ok(());
                 }
-                return Err(err);
+                Ok(n) => {
+                    self.push(&buf[..n]);
+                    self.drain(writer, false)?;
+                    writer.flush()?;
+                }
+                Err(Errno::EINTR) => continue,
+                Err(e) => return Err(e.into()),
             }
-
-            if n == 0 {
-                self.drain(writer, true)?;
-                writer.flush()?;
-                return Ok(());
-            }
-
-            self.push(&buf[..n as usize]);
-            self.drain(writer, false)?;
-            writer.flush()?;
         }
     }
 
@@ -165,6 +153,7 @@ mod tests {
     use proptest::prelude::*;
     use proptest::property_test;
     use std::collections::HashSet;
+    use std::os::fd::{AsFd, OwnedFd};
     use std::thread;
     use std::time::Duration;
 
@@ -215,18 +204,16 @@ mod tests {
     fn short_timeout_flushes_prefix_before_continuation_arrives() {
         let mut rewriter = InputRewriter::new(vec![RewriteRule::parse(r"\x1bb:\x02").unwrap()])
             .with_pending_timeout(Duration::from_nanos(1));
-        let (read_fd, write_fd) = pipe();
+        let (read_fd, write_fd) = nix::unistd::pipe().unwrap();
 
         let writer = thread::spawn(move || {
-            write_all(write_fd, b"\x1b");
+            write_all_fd(&write_fd, b"\x1b");
             thread::sleep(Duration::from_millis(10));
-            write_all(write_fd, b"b");
-            close(write_fd);
+            write_all_fd(&write_fd, b"b");
         });
 
         let mut output = Vec::new();
-        rewriter.rewrite(read_fd, &mut output).unwrap();
-        close(read_fd);
+        rewriter.rewrite(read_fd.as_fd(), &mut output).unwrap();
         writer.join().unwrap();
 
         // Timeout ≈ 0ms: "\x1b" flushed before "b" arrives — no match
@@ -237,18 +224,16 @@ mod tests {
     fn long_timeout_allows_split_bytes_to_combine() {
         let mut rewriter = InputRewriter::new(vec![RewriteRule::parse(r"\x1bb:\x02").unwrap()])
             .with_pending_timeout(Duration::from_secs(60));
-        let (read_fd, write_fd) = pipe();
+        let (read_fd, write_fd) = nix::unistd::pipe().unwrap();
 
         let writer = thread::spawn(move || {
-            write_all(write_fd, b"\x1b");
+            write_all_fd(&write_fd, b"\x1b");
             thread::sleep(Duration::from_millis(10));
-            write_all(write_fd, b"b");
-            close(write_fd);
+            write_all_fd(&write_fd, b"b");
         });
 
         let mut output = Vec::new();
-        rewriter.rewrite(read_fd, &mut output).unwrap();
-        close(read_fd);
+        rewriter.rewrite(read_fd.as_fd(), &mut output).unwrap();
         writer.join().unwrap();
 
         // Timeout = 60s: "b" arrives well within timeout — match
@@ -256,35 +241,22 @@ mod tests {
     }
 
     fn rewrite_bytes(rewriter: &mut InputRewriter, input: &[u8]) -> Vec<u8> {
-        let (read_fd, write_fd) = pipe();
-        write_all(write_fd, input);
-        close(write_fd);
+        let (read_fd, write_fd) = nix::unistd::pipe().unwrap();
+        write_all_fd(&write_fd, input);
+        drop(write_fd);
 
         let mut output = Vec::new();
-        rewriter.rewrite(read_fd, &mut output).unwrap();
-        close(read_fd);
+        rewriter.rewrite(read_fd.as_fd(), &mut output).unwrap();
         output
     }
 
-    fn pipe() -> (RawFd, RawFd) {
-        let mut fds = [0i32; 2];
-        assert_eq!(unsafe { nix::libc::pipe(fds.as_mut_ptr()) }, 0);
-        (fds[0], fds[1])
-    }
-
-    fn write_all(fd: RawFd, data: &[u8]) {
+    fn write_all_fd(fd: &OwnedFd, data: &[u8]) {
         let mut offset = 0;
         while offset < data.len() {
-            let n = unsafe {
-                nix::libc::write(fd, data[offset..].as_ptr().cast(), data.len() - offset)
-            };
+            let n = nix::unistd::write(fd, &data[offset..]).unwrap();
             assert!(n > 0);
-            offset += n as usize;
+            offset += n;
         }
-    }
-
-    fn close(fd: RawFd) {
-        assert_eq!(unsafe { nix::libc::close(fd) }, 0);
     }
 
     /// Reference implementation: process input in one pass as a pure function.
