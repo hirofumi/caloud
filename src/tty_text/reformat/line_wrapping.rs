@@ -1,7 +1,6 @@
 use crate::tty_text::fragment::{EscapeSequence, Fragment};
 
-const INDENT: &[u8] = b"  ";
-const LEFT_MARGIN: usize = INDENT.len();
+const MAX_CONTINUATION_INDENT: usize = 2;
 const WRAP_EDGE_SLACK: usize = 4;
 
 pub(super) fn adjust_line_wrapping(
@@ -28,23 +27,20 @@ pub(super) fn adjust_line_wrapping(
                 break 'outer;
             };
 
-            if !is_url_continuation_candidate(&line) {
+            let Some(margin) = url_continuation_indent(&line) else {
                 cursor.rewind();
                 break;
-            }
+            };
 
             // Only join continuations whose content is all ASCII graphic (no spaces).
             // Lines with spaces are surrounding prose, not URL fragments; joining
             // them would lose the inter-word space consumed by terminal wrapping.
-            if !is_ascii_graphic_run(&line[LEFT_MARGIN..]) {
+            if !is_ascii_graphic_run(&line[margin..]) {
                 // Exception: if the previous line filled exactly terminal_width
-                // (forced wrap at the boundary) and the continuation has standard
-                // margin (no extra space preserved), this is likely a URL split.
+                // (forced wrap at the boundary), this is likely a URL split.
                 // Cursor-forward escapes within the continuation preserve word-boundary
                 // spaces, so joining the whole line is safe.
-                let looks_like_forced_wrap = usize::from(terminal_width) <= previous_line_width
-                    && line.iter().take_while(|&&b| b == b' ').count() == LEFT_MARGIN;
-                if !looks_like_forced_wrap {
+                if usize::from(terminal_width) > previous_line_width {
                     cursor.rewind();
                     break;
                 }
@@ -261,47 +257,46 @@ fn should_attempt_url_unwrap(line: &[u8], terminal_width: u16) -> bool {
             + line[i..].len()
 }
 
-fn is_url_continuation_candidate(line: &[u8]) -> bool {
-    if !has_standard_indent(line) {
-        return false;
-    }
+fn url_continuation_indent(line: &[u8]) -> Option<usize> {
+    let margin = continuation_indent(line)?;
 
     // ordered list
-    if let Some(i) = line[LEFT_MARGIN..]
-        .iter()
-        .position(|&b| !b.is_ascii_digit())
+    if let Some(i) = line[margin..].iter().position(|&b| !b.is_ascii_digit())
         && i > 0
     {
-        let i = LEFT_MARGIN + i;
+        let i = margin + i;
         if line.get(i) == Some(&b'.') && line.get(i + 1).is_none_or(|&b| b == b' ') {
-            return false;
+            return None;
         }
     }
 
     // unordered list
-    if line.get(LEFT_MARGIN) == Some(&b'-') && line.get(LEFT_MARGIN + 1).is_none_or(|&b| b == b' ')
-    {
-        return false;
+    if line.get(margin) == Some(&b'-') && line.get(margin + 1).is_none_or(|&b| b == b' ') {
+        return None;
     }
 
-    if starts_with_url_scheme(&line[LEFT_MARGIN..]) {
-        return false;
+    if starts_with_url_scheme(&line[margin..]) {
+        return None;
     }
 
-    line[LEFT_MARGIN].is_ascii_graphic()
+    line[margin].is_ascii_graphic().then_some(margin)
 }
 
 fn can_have_another_url_continuation(line: &[u8], terminal_width: u16) -> bool {
-    if !has_standard_indent(line) {
+    let Some(margin) = continuation_indent(line) else {
         return false;
-    }
+    };
 
     usize::from(terminal_width).saturating_sub(WRAP_EDGE_SLACK) <= line.len()
-        && is_ascii_graphic_run(&line[LEFT_MARGIN..])
+        && is_ascii_graphic_run(&line[margin..])
 }
 
-fn has_standard_indent(line: &[u8]) -> bool {
-    LEFT_MARGIN < line.len() && &line[..LEFT_MARGIN] == INDENT
+fn continuation_indent(line: &[u8]) -> Option<usize> {
+    let n = line.iter().take_while(|&&b| b == b' ').count();
+    (1..=MAX_CONTINUATION_INDENT)
+        .contains(&n)
+        .then_some(n)
+        .filter(|&n| n < line.len())
 }
 
 fn starts_with_url_scheme(line: &[u8]) -> bool {
@@ -431,27 +426,28 @@ mod tests {
         let tw = tw as usize;
         let min_url_length = "a://b".len();
 
-        (min_url_length..=tw, 0usize..4)
-            .prop_flat_map(move |(url_length, n)| {
+        (
+            min_url_length..=tw,
+            0usize..4,
+            1usize..=MAX_CONTINUATION_INDENT,
+        )
+            .prop_flat_map(move |(url_length, n, indent)| {
                 (
                     arb_url_body_without_colon(tw - url_length),
                     arb_url(url_length),
                     prop::collection::vec(
                         (
-                            arb_break_and_indent(LEFT_MARGIN),
-                            arb_url_body_without_colon(tw - LEFT_MARGIN),
+                            arb_break_and_indent(indent),
+                            arb_url_body_without_colon(tw - indent),
                         ),
                         n,
                     ),
                     if trailing {
                         (arb_break_and_indent(0), Just(vec![])).boxed()
                     } else {
-                        (0..=tw - LEFT_MARGIN)
-                            .prop_flat_map(|n| {
-                                (
-                                    arb_break_and_indent(LEFT_MARGIN),
-                                    arb_url_body_without_colon(n),
-                                )
+                        (0..=tw - indent)
+                            .prop_flat_map(move |n| {
+                                (arb_break_and_indent(indent), arb_url_body_without_colon(n))
                             })
                             .boxed()
                     },
