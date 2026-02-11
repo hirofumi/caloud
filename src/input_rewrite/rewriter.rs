@@ -1,10 +1,16 @@
 use super::rule::RewriteRule;
 use std::collections::HashSet;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
+use std::os::fd::RawFd;
+use std::time::Duration;
+
+/// Default timeout for flushing pending prefix bytes (ESC ambiguity resolution)
+const DEFAULT_PENDING_TIMEOUT: Duration = Duration::from_millis(50);
 
 pub struct InputRewriter {
     rules: Vec<RewriteRule>,
     buffer: Vec<u8>,
+    pending_timeout: Duration,
 }
 
 impl InputRewriter {
@@ -22,42 +28,94 @@ impl InputRewriter {
         InputRewriter {
             rules,
             buffer: Vec::new(),
+            pending_timeout: DEFAULT_PENDING_TIMEOUT,
         }
     }
 
-    pub fn rewrite<R: Read, W: Write>(
-        &mut self,
-        reader: &mut R,
-        writer: &mut W,
-    ) -> io::Result<u64> {
-        if self.rules.is_empty() {
-            return io::copy(reader, writer);
-        }
-
-        let mut total_written = 0u64;
-        let mut read_buffer = [0u8; 4096];
+    /// Read from `fd` and write rewritten output to `writer`, using poll(2)
+    /// to resolve prefix ambiguity via timeout.
+    ///
+    /// `fd` must not be wrapped in a buffered reader (e.g. `std::io::Stdin`),
+    /// because its internal buffer would hide data from poll(2).
+    pub fn rewrite<W: Write>(&mut self, fd: RawFd, writer: &mut W) -> io::Result<()> {
+        let mut pfd = nix::libc::pollfd {
+            fd,
+            events: nix::libc::POLLIN,
+            revents: 0,
+        };
+        let mut buf = [0u8; 4096];
 
         loop {
-            let n = reader.read(&mut read_buffer)?;
-            if n == 0 {
-                total_written += self.rewrite_and_flush(writer, true)?;
-                break;
-            }
-            self.buffer.extend_from_slice(&read_buffer[..n]);
-            total_written += self.rewrite_and_flush(writer, false)?;
-        }
+            let timeout = if self.has_pending() {
+                self.pending_timeout.as_millis().min(i32::MAX as u128) as i32
+            } else {
+                -1
+            };
 
-        Ok(total_written)
+            pfd.revents = 0;
+            let poll_ret = unsafe { nix::libc::poll(&mut pfd, 1, timeout) };
+
+            if poll_ret < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+
+            if poll_ret == 0 {
+                // Timeout: flush pending bytes without waiting for longer matches
+                self.drain(writer, true)?;
+                writer.flush()?;
+                continue;
+            }
+
+            let n = unsafe { nix::libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+
+            if n < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+
+            if n == 0 {
+                self.drain(writer, true)?;
+                writer.flush()?;
+                return Ok(());
+            }
+
+            self.push(&buf[..n as usize]);
+            self.drain(writer, false)?;
+            writer.flush()?;
+        }
     }
 
-    fn rewrite_and_flush<W: Write>(&mut self, writer: &mut W, at_eof: bool) -> io::Result<u64> {
+    #[cfg(test)]
+    fn with_pending_timeout(mut self, timeout: Duration) -> Self {
+        self.pending_timeout = timeout;
+        self
+    }
+
+    fn push(&mut self, data: &[u8]) {
+        self.buffer.extend_from_slice(data);
+    }
+
+    fn has_pending(&self) -> bool {
+        !self.buffer.is_empty()
+    }
+
+    /// Process the buffer and write output. When `force` is true,
+    /// skip waiting for potentially longer matches (used on timeout/EOF).
+    fn drain<W: Write>(&mut self, writer: &mut W, force: bool) -> io::Result<u64> {
         let mut written = 0u64;
         let mut i = 0;
 
         while i < self.buffer.len() {
             let remaining = &self.buffer[i..];
 
-            if !at_eof {
+            if !force {
                 let might_match_longer_rule = self.rules.iter().any(|rule| {
                     rule.from().len() > remaining.len() && rule.from().starts_with(remaining)
                 });
@@ -98,22 +156,17 @@ mod tests {
     use proptest::prelude::*;
     use proptest::property_test;
     use std::collections::HashSet;
+    use std::thread;
+    use std::time::Duration;
 
     #[property_test]
     fn rewrite_output_equals_naive_output(
         #[strategy = arb_alphabet_01_rules()] rules: Vec<RewriteRule>,
-        #[strategy = arb_alphabet_01_chunks()] chunks: Vec<Vec<u8>>,
+        #[strategy = arb_alphabet_01_bytes(0..64)] input: Vec<u8>,
     ) {
-        let expected = rewrite_bytes_naively(
-            &rules,
-            &chunks.iter().flatten().copied().collect::<Vec<_>>(),
-        );
-        let mut output = Vec::new();
-        let n = InputRewriter::new(rules)
-            .rewrite(&mut ChunkReader::new(chunks), &mut output)
-            .unwrap();
+        let expected = rewrite_bytes_naively(&rules, &input);
+        let output = rewrite_bytes(&mut InputRewriter::new(rules), &input);
         prop_assert_eq!(&output, &expected);
-        prop_assert_eq!(n, output.len() as u64);
     }
 
     #[test]
@@ -135,15 +188,6 @@ mod tests {
     }
 
     #[test]
-    fn longest_match_across_chunk_boundaries() {
-        let mut rewriter = InputRewriter::new(vec![
-            RewriteRule::parse(r"a:short").unwrap(),
-            RewriteRule::parse(r"ab:long").unwrap(),
-        ]);
-        assert_eq!(rewrite_chunks(&mut rewriter, &[b"a", b"b"]), b"long");
-    }
-
-    #[test]
     fn eof_flushes_unmatched_buffer_as_raw() {
         let mut rewriter = InputRewriter::new(vec![RewriteRule::parse("abc:x").unwrap()]);
         assert_eq!(rewrite_bytes(&mut rewriter, b"ab"), b"ab");
@@ -158,23 +202,80 @@ mod tests {
         assert_eq!(rewrite_bytes(&mut rewriter, b"ab"), b"ba");
     }
 
-    fn rewrite_chunks(rewriter: &mut InputRewriter, chunks: &[&[u8]]) -> Vec<u8> {
+    #[test]
+    fn short_timeout_flushes_prefix_before_continuation_arrives() {
+        let mut rewriter = InputRewriter::new(vec![RewriteRule::parse(r"\x1bb:\x02").unwrap()])
+            .with_pending_timeout(Duration::from_nanos(1));
+        let (read_fd, write_fd) = pipe();
+
+        let writer = thread::spawn(move || {
+            write_all(write_fd, b"\x1b");
+            thread::sleep(Duration::from_millis(10));
+            write_all(write_fd, b"b");
+            close(write_fd);
+        });
+
         let mut output = Vec::new();
-        rewriter
-            .rewrite(
-                &mut ChunkReader::new(chunks.iter().map(|chunk| chunk.to_vec()).collect()),
-                &mut output,
-            )
-            .unwrap();
-        output
+        rewriter.rewrite(read_fd, &mut output).unwrap();
+        close(read_fd);
+        writer.join().unwrap();
+
+        // Timeout ≈ 0ms: "\x1b" flushed before "b" arrives — no match
+        assert_eq!(output, b"\x1bb");
+    }
+
+    #[test]
+    fn long_timeout_allows_split_bytes_to_combine() {
+        let mut rewriter = InputRewriter::new(vec![RewriteRule::parse(r"\x1bb:\x02").unwrap()])
+            .with_pending_timeout(Duration::from_secs(60));
+        let (read_fd, write_fd) = pipe();
+
+        let writer = thread::spawn(move || {
+            write_all(write_fd, b"\x1b");
+            thread::sleep(Duration::from_millis(10));
+            write_all(write_fd, b"b");
+            close(write_fd);
+        });
+
+        let mut output = Vec::new();
+        rewriter.rewrite(read_fd, &mut output).unwrap();
+        close(read_fd);
+        writer.join().unwrap();
+
+        // Timeout = 60s: "b" arrives well within timeout — match
+        assert_eq!(output, b"\x02");
     }
 
     fn rewrite_bytes(rewriter: &mut InputRewriter, input: &[u8]) -> Vec<u8> {
+        let (read_fd, write_fd) = pipe();
+        write_all(write_fd, input);
+        close(write_fd);
+
         let mut output = Vec::new();
-        rewriter
-            .rewrite(&mut io::Cursor::new(input), &mut output)
-            .unwrap();
+        rewriter.rewrite(read_fd, &mut output).unwrap();
+        close(read_fd);
         output
+    }
+
+    fn pipe() -> (RawFd, RawFd) {
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { nix::libc::pipe(fds.as_mut_ptr()) }, 0);
+        (fds[0], fds[1])
+    }
+
+    fn write_all(fd: RawFd, data: &[u8]) {
+        let mut offset = 0;
+        while offset < data.len() {
+            let n = unsafe {
+                nix::libc::write(fd, data[offset..].as_ptr().cast(), data.len() - offset)
+            };
+            assert!(n > 0);
+            offset += n as usize;
+        }
+    }
+
+    fn close(fd: RawFd) {
+        assert_eq!(unsafe { nix::libc::close(fd) }, 0);
     }
 
     /// Reference implementation: process input in one pass as a pure function.
@@ -221,52 +322,9 @@ mod tests {
         )
     }
 
-    fn arb_alphabet_01_chunks() -> impl Strategy<Value = Vec<Vec<u8>>> {
-        prop::collection::vec(arb_alphabet_01_bytes(0..16), 0..8)
-    }
-
     fn arb_alphabet_01_bytes(
         len: impl Into<prop::collection::SizeRange>,
     ) -> impl Strategy<Value = Vec<u8>> {
         prop::collection::vec(0u8..=1, len)
-    }
-
-    struct ChunkReader {
-        chunks: Vec<Vec<u8>>,
-        index: usize,
-        offset: usize,
-    }
-
-    impl ChunkReader {
-        fn new(chunks: Vec<Vec<u8>>) -> Self {
-            ChunkReader {
-                chunks,
-                index: 0,
-                offset: 0,
-            }
-        }
-    }
-
-    impl Read for ChunkReader {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            while self.index < self.chunks.len() {
-                let chunk = &self.chunks[self.index];
-                let remaining = &chunk[self.offset..];
-                if remaining.is_empty() {
-                    self.index += 1;
-                    self.offset = 0;
-                    continue;
-                }
-                let n = usize::min(remaining.len(), buf.len());
-                buf[..n].copy_from_slice(&remaining[..n]);
-                self.offset += n;
-                if self.offset >= chunk.len() {
-                    self.index += 1;
-                    self.offset = 0;
-                }
-                return Ok(n);
-            }
-            Ok(0)
-        }
     }
 }

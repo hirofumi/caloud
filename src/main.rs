@@ -51,7 +51,9 @@ fn intercept(child: Pid, master: OwnedFd, mut runtime: Runtime) -> anyhow::Resul
     set_global_delegate().context("set_global_delegate")?;
     spawn_winsize_updater(master).context("spawn_winsize_updater")?;
     let mut input_rewriter = runtime.input_rewriter;
-    thread::spawn(move || input_rewriter.rewrite(&mut io::stdin(), &mut writer));
+    thread::spawn(move || {
+        let _ = input_rewriter.rewrite(nix::libc::STDIN_FILENO, &mut writer);
+    });
 
     debug_assert!(TERMINAL_WIDTH.load(std::sync::atomic::Ordering::Relaxed) > 0);
 
