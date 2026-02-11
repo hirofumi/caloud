@@ -111,6 +111,7 @@ impl InputRewriter {
     fn drain<W: Write>(&mut self, writer: &mut W, force: bool) -> io::Result<u64> {
         let mut written = 0u64;
         let mut i = 0;
+        let mut passthrough_from = 0;
 
         while i < self.buffer.len() {
             let remaining = &self.buffer[i..];
@@ -127,21 +128,29 @@ impl InputRewriter {
             let mut matched = false;
             for rule in &self.rules {
                 if remaining.starts_with(rule.from()) {
+                    if passthrough_from < i {
+                        writer.write_all(&self.buffer[passthrough_from..i])?;
+                        written += (i - passthrough_from) as u64;
+                    }
                     if !rule.to().is_empty() {
                         writer.write_all(rule.to())?;
                         written += rule.to().len() as u64;
                     }
                     i += rule.from().len();
+                    passthrough_from = i;
                     matched = true;
                     break;
                 }
             }
 
             if !matched {
-                writer.write_all(&remaining[..1])?;
-                written += 1;
                 i += 1;
             }
+        }
+
+        if passthrough_from < i {
+            writer.write_all(&self.buffer[passthrough_from..i])?;
+            written += (i - passthrough_from) as u64;
         }
 
         self.buffer.drain(..i);
