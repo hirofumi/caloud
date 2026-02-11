@@ -9,15 +9,32 @@ pub(super) fn adjust_line_wrapping(
     terminal_width: u16,
 ) -> usize {
     let mut cursor = FragmentCursor::new(fragments, terminal_width);
+    let mut prev: Option<(usize, Vec<u8>)> = None;
 
     'outer: loop {
-        let adjusted = cursor.position();
-        let Some(line) = cursor.extract_line() else {
+        let mut adjusted = cursor.position();
+        let Some(mut line) = cursor.extract_line() else {
             break;
         };
+
+        // Try backward join before the URL check: the current line may lack
+        // `://` entirely when the split falls inside the `://` itself
+        // (e.g. `file:` on line A, `///...` on line B).
+        if let Some((prev_adjusted, prev_line)) = prev.take()
+            && has_split_url_scheme(&prev_line, &line)
+        {
+            cursor.join();
+            cursor.set_position(prev_adjusted);
+            adjusted = prev_adjusted;
+            // join() removes only the A-B boundary; B's trailing boundary remains.
+            line = cursor.extract_line().unwrap();
+        }
+
         if !should_attempt_url_unwrap(&line, terminal_width) {
+            prev = (line_width(&line) == usize::from(terminal_width)).then_some((adjusted, line));
             continue;
         }
+        prev = None;
 
         let mut previous_line_width = line_width(&line);
 
@@ -136,7 +153,7 @@ impl<'a, 'b> FragmentCursor<'a, 'b> {
             match fragment.escape_sequence() {
                 None => {
                     if fragment.data().contains(&b'\n')
-                        || is_visual_line_break(&self.fragments[i - 1..])
+                        || visual_line_break_length(&self.fragments[i - 1..]).is_some()
                     {
                         found = true;
                         break;
@@ -188,16 +205,14 @@ impl<'a, 'b> FragmentCursor<'a, 'b> {
     /// left-trims the first plain-text fragment of the continuation.
     fn join(&mut self) {
         debug_assert!(self.line_start >= 1);
-        let is_visual = is_visual_line_break(&self.fragments[self.line_start - 1..]);
+        let visual_break_length = visual_line_break_length(&self.fragments[self.line_start - 1..]);
         self.fragments[self.line_start - 1].chomp();
 
         let mut i = self.line_start;
-        if is_visual {
-            // Match is_visual_line_break: skip at most one CUF before CUD.
-            if self.fragments.get(i).is_some_and(Fragment::is_cuf) {
-                self.remove_at(i);
-            }
-            debug_assert!(self.fragments.get(i).is_some_and(Fragment::is_cud));
+        // Remove the CUF? CUD fragments identified by visual_line_break_length.
+        // `visual_break_length` counts from the \r fragment (index 0) up to and
+        // including the CUD, so fragments 1..visual_break_length are CUF?/CUD.
+        for _ in 1..visual_break_length.unwrap_or(0) {
             self.remove_at(i);
         }
         self.remove_while(i, |f| f.is_cuf());
@@ -211,14 +226,20 @@ impl<'a, 'b> FragmentCursor<'a, 'b> {
     }
 }
 
-fn is_visual_line_break(fragments: &[Fragment]) -> bool {
-    fragments.first().is_some_and(|f| f.data().ends_with(b"\r")) && {
-        let mut i = 1;
-        if fragments.get(i).is_some_and(Fragment::is_cuf) {
-            i += 1;
-        }
-        fragments.get(i).is_some_and(Fragment::is_cud)
+/// Returns the number of fragments that form a visual line break (`\r CUF? CUD`),
+/// or `None` if the fragments do not start with one.
+fn visual_line_break_length(fragments: &[Fragment]) -> Option<usize> {
+    if !fragments.first().is_some_and(|f| f.data().ends_with(b"\r")) {
+        return None;
     }
+    let mut i = 1;
+    if fragments.get(i).is_some_and(Fragment::is_cuf) {
+        i += 1;
+    }
+    fragments
+        .get(i)
+        .is_some_and(Fragment::is_cud)
+        .then_some(i + 1)
 }
 
 fn cursor_forward_columns(data: &[u8]) -> Option<usize> {
@@ -301,8 +322,72 @@ fn continuation_indent(line: &[u8]) -> Option<usize> {
 
 fn starts_with_url_scheme(line: &[u8]) -> bool {
     line.iter()
-        .position(|&b| !(b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.')))
+        .position(|&b| !is_scheme_char(b))
         .is_some_and(|i| line[0].is_ascii_alphabetic() && line[i..].starts_with(b"://"))
+}
+
+/// Detect a URL scheme split across a forced line wrap.
+///
+/// When inline code containing a URL is styled with SGR escapes and the
+/// terminal forces a wrap at the column boundary, the scheme can end up
+/// split.  After SGR stripping by `extract_line`, neither line alone
+/// contains a recognisable `scheme://` pattern.
+///
+/// Two split positions are handled:
+///
+/// - **Intra-scheme**: scheme characters are split across lines.
+///   E.g. `fil` on line A and `e:///...` on line B.
+///
+/// - **Colon boundary**: the colon lands at the end of line A and `//`
+///   starts line B.  E.g. `file:` on line A and `///...` on line B.
+fn has_split_url_scheme(prev_line: &[u8], current_line: &[u8]) -> bool {
+    let Some(margin) = continuation_indent(current_line) else {
+        return false;
+    };
+    let after_margin = &current_line[margin..];
+
+    // Intra-scheme split: `://` is on the current line but the leading
+    // scheme characters are incomplete (the rest is on prev_line).
+    //
+    // Known false-positive risk: if prev_line ends with a word that
+    // happens to consist of valid scheme chars (e.g. "file") and the
+    // current line starts with a complete URL (e.g. "https://..."), the
+    // two are incorrectly joined.  This requires: (a) prev at terminal
+    // width, (b) 1-2 space continuation indent, and (c) a URL
+    // immediately after indent.
+    if let Some(colon_pos) = after_margin.windows(3).position(|w| w == b"://")
+        && after_margin[..colon_pos].iter().all(|&b| is_scheme_char(b))
+    {
+        let prefix_len = prev_line
+            .iter()
+            .rev()
+            .take_while(|&&b| is_scheme_char(b))
+            .count();
+        if prefix_len > 0 && prev_line[prev_line.len() - prefix_len].is_ascii_alphabetic() {
+            return true;
+        }
+    }
+
+    // Colon-boundary split: prev_line ends with `<scheme>:` and the current
+    // line begins with `//`.
+    if after_margin.starts_with(b"//") && prev_line.last() == Some(&b':') {
+        let before_colon = &prev_line[..prev_line.len() - 1];
+        let scheme_len = before_colon
+            .iter()
+            .rev()
+            .take_while(|&&b| is_scheme_char(b))
+            .count();
+        if scheme_len > 0 && before_colon[before_colon.len() - scheme_len].is_ascii_alphabetic() {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// RFC 3986 §3.1: `scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`
+fn is_scheme_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.')
 }
 
 fn is_ascii_graphic_run(data: &[u8]) -> bool {

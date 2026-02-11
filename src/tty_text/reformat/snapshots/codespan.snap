@@ -1,0 +1,8 @@
+---
+source: src/tty_text/reformat/line_wrapping.rs
+assertion_line: 434
+expression: output
+input_file: src/tty_text/reformat/snapshots/codespan.capture.raw
+extension: raw
+snapshot_kind: binary
+---
