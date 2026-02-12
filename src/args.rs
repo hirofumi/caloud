@@ -14,6 +14,7 @@ pub struct Arguments {
     say_args: Option<OsString>,
     line_wrap_mode: LineWrapMode,
     rewrite_rules: Vec<RewriteRule>,
+    zwsp_after_updown_arrow: bool,
     claude_argv: Vec<OsString>,
 }
 
@@ -27,6 +28,7 @@ impl Arguments {
             notification_center_delivery_enabled: self.notification_center_delivery_enabled,
             say_command: self.say_args.map(Self::try_build_say_command).transpose()?,
             input_rewriter: InputRewriter::new(self.rewrite_rules),
+            zwsp_after_updown_arrow: self.zwsp_after_updown_arrow,
             reformatter: Reformatter::new(0, self.line_wrap_mode),
             claude_command: Self::try_build_claude_command(self.claude_argv)?,
         })
@@ -55,6 +57,7 @@ fn parse_args(args: impl IntoIterator<Item = impl Into<OsString>>) -> anyhow::Re
     let mut say_args = None;
     let mut line_wrap_mode = LineWrapMode::Preserve;
     let mut rewrite_rules: Vec<RewriteRule> = Vec::new();
+    let mut zwsp_after_updown_arrow = false;
     let mut claude_argv: Vec<OsString> = Vec::new();
 
     let mut parser = lexopt::Parser::from_iter(args);
@@ -80,6 +83,9 @@ fn parse_args(args: impl IntoIterator<Item = impl Into<OsString>>) -> anyhow::Re
                     .with_context(|| format!("failed to parse --input-rewrite: {}", value))?;
                 rewrite_rules.push(rule);
             }
+            Long("zwsp-after-updown-arrow") => {
+                zwsp_after_updown_arrow = true;
+            }
             Value(val) => {
                 claude_argv.push(val);
             }
@@ -92,6 +98,7 @@ fn parse_args(args: impl IntoIterator<Item = impl Into<OsString>>) -> anyhow::Re
         say_args,
         line_wrap_mode,
         rewrite_rules,
+        zwsp_after_updown_arrow,
         claude_argv,
     })
 }
@@ -106,6 +113,7 @@ mod tests {
         assert!(!arguments.notification_center_delivery_enabled);
         assert!(arguments.say_args.is_none());
         assert_eq!(arguments.line_wrap_mode, LineWrapMode::Preserve);
+        assert!(!arguments.zwsp_after_updown_arrow);
     }
 
     #[test]
@@ -216,6 +224,12 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("failed to parse --input-rewrite"));
+    }
+
+    #[test]
+    fn zwsp_after_updown_arrow_option() {
+        let arguments = parse_args(["prog", "--zwsp-after-updown-arrow"]).unwrap();
+        assert!(arguments.zwsp_after_updown_arrow);
     }
 
     #[test]

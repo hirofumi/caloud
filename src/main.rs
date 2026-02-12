@@ -2,6 +2,7 @@ use crate::runtime::Runtime;
 use crate::tty_text::buffer::Buffer;
 use crate::tty_text::fragment::EscapeSequence;
 use anyhow::Context;
+use input_rewrite::zwsp_inserter::ZwspInserter;
 use macos::notification::{deliver_if_osc9_unsupported, set_global_delegate};
 use nix::pty::{ForkptyResult, forkpty};
 use nix::sys::signal::{SigHandler, SigSet, Signal, signal};
@@ -51,8 +52,13 @@ fn intercept(child: Pid, master: OwnedFd, mut runtime: Runtime) -> anyhow::Resul
     set_global_delegate().context("set_global_delegate")?;
     spawn_winsize_updater(master).context("spawn_winsize_updater")?;
     let mut input_rewriter = runtime.input_rewriter;
+    let zwsp_after_updown_arrow = runtime.zwsp_after_updown_arrow;
     thread::spawn(move || {
-        let _ = input_rewriter.rewrite(io::stdin(), &mut writer);
+        if zwsp_after_updown_arrow {
+            let _ = input_rewriter.rewrite(io::stdin(), &mut ZwspInserter::new(writer));
+        } else {
+            let _ = input_rewriter.rewrite(io::stdin(), &mut writer);
+        }
     });
 
     debug_assert!(TERMINAL_WIDTH.load(std::sync::atomic::Ordering::Relaxed) > 0);

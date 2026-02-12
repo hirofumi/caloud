@@ -7,6 +7,7 @@ pub struct Runtime {
     pub notification_center_delivery_enabled: bool,
     pub say_command: Option<SayCommand>,
     pub input_rewriter: InputRewriter,
+    pub zwsp_after_updown_arrow: bool,
     pub reformatter: Reformatter,
     pub claude_command: ClaudeCommand,
 }
