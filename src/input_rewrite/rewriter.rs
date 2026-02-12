@@ -46,22 +46,19 @@ impl InputRewriter {
         let mut buf = [0u8; 4096];
 
         loop {
-            let timeout: Option<u16> = if self.has_pending() {
-                Some(self.pending_timeout.as_millis().min(u16::MAX as u128) as u16)
-            } else {
-                None
-            };
-
-            match nix::poll::poll(std::slice::from_mut(&mut pfd), timeout) {
-                Ok(0) => {
-                    // Timeout: flush pending bytes without waiting for longer matches
-                    self.drain(writer, true)?;
-                    writer.flush()?;
-                    continue;
+            if self.has_pending() {
+                let timeout = self.pending_timeout.as_millis().min(u16::MAX as u128) as u16;
+                match nix::poll::poll(std::slice::from_mut(&mut pfd), timeout) {
+                    Ok(0) => {
+                        // Timeout: flush pending bytes without waiting for longer matches
+                        self.drain(writer, true)?;
+                        writer.flush()?;
+                        continue;
+                    }
+                    Ok(_) => {}
+                    Err(Errno::EINTR) => continue,
+                    Err(e) => return Err(e.into()),
                 }
-                Ok(_) => {}
-                Err(Errno::EINTR) => continue,
-                Err(e) => return Err(e.into()),
             }
 
             match nix::unistd::read(fd, &mut buf) {
