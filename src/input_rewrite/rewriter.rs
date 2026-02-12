@@ -96,8 +96,7 @@ impl InputRewriter {
 
     /// Process the buffer and write output. When `force` is true,
     /// skip waiting for potentially longer matches (used on timeout/EOF).
-    fn drain<W: Write>(&mut self, writer: &mut W, force: bool) -> io::Result<u64> {
-        let mut written = 0u64;
+    fn drain<W: Write>(&mut self, writer: &mut W, force: bool) -> io::Result<()> {
         let mut i = 0;
         let mut passthrough_from = 0;
 
@@ -118,11 +117,9 @@ impl InputRewriter {
                 if remaining.starts_with(rule.from()) {
                     if passthrough_from < i {
                         writer.write_all(&self.buffer[passthrough_from..i])?;
-                        written += (i - passthrough_from) as u64;
                     }
                     if !rule.to().is_empty() {
                         writer.write_all(rule.to())?;
-                        written += rule.to().len() as u64;
                     }
                     i += rule.from().len();
                     passthrough_from = i;
@@ -138,11 +135,10 @@ impl InputRewriter {
 
         if passthrough_from < i {
             writer.write_all(&self.buffer[passthrough_from..i])?;
-            written += (i - passthrough_from) as u64;
         }
 
         self.buffer.drain(..i);
-        Ok(written)
+        Ok(())
     }
 }
 
