@@ -3,7 +3,7 @@ use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags};
 use std::collections::HashSet;
 use std::io::{self, Write};
-use std::os::fd::BorrowedFd;
+use std::os::fd::AsFd;
 use std::time::Duration;
 
 /// Default timeout for flushing pending prefix bytes (ESC ambiguity resolution)
@@ -40,7 +40,8 @@ impl InputRewriter {
     /// The underlying file descriptor must not also be read through a buffered
     /// reader (e.g. `std::io::Stdin`), because its internal buffer would hide
     /// data from poll(2).
-    pub fn rewrite<W: Write>(&mut self, fd: BorrowedFd<'_>, writer: &mut W) -> io::Result<()> {
+    pub fn rewrite<W: Write>(&mut self, fd: impl AsFd, writer: &mut W) -> io::Result<()> {
+        let fd = fd.as_fd();
         let mut pfd = PollFd::new(fd, PollFlags::POLLIN);
         let mut buf = [0u8; 4096];
 
