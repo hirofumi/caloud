@@ -7,7 +7,7 @@ use std::os::fd::AsFd;
 use std::time::Duration;
 
 /// Default timeout for flushing pending prefix bytes (ESC ambiguity resolution)
-const DEFAULT_PENDING_TIMEOUT: Duration = Duration::from_millis(50);
+const DEFAULT_PENDING_TIMEOUT: Duration = Duration::from_millis(10);
 
 pub struct InputRewriter {
     rules: Vec<RewriteRule>,
