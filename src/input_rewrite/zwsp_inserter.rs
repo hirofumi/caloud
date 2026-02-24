@@ -36,23 +36,24 @@ impl<W: Write> ZwspInserter<W> {
 
 impl<W: Write> Write for ZwspInserter<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        for &b in buf {
-            match self.state {
+        let mut passthrough_from = 0;
+
+        for (i, &b) in buf.iter().enumerate() {
+            let insert_zwsp = match self.state {
                 State::Idle => {
                     if b == 0x1b {
                         self.state = State::EscSeen;
                     }
-                    self.inner.write_all(&[b])?;
+                    false
                 }
                 State::EscSeen => {
                     if b == b'[' {
                         self.state = State::CsiStart;
-                    } else if b == 0x1b {
+                    } else if b != 0x1b {
                         // Another ESC restarts the sequence (e.g., \x1b\x1b[A (Alt+Up))
-                    } else {
                         self.state = State::Idle;
                     }
-                    self.inner.write_all(&[b])?;
+                    false
                 }
                 State::CsiStart => {
                     if b == b'A' || b == b'B' {
@@ -63,32 +64,36 @@ impl<W: Write> Write for ZwspInserter<W> {
                         // Any other final byte (0x40-0x7e) ends the sequence
                         self.state = State::Idle;
                     }
-                    self.inner.write_all(&[b])?;
+                    false
                 }
                 State::CsiParam => {
                     if b == b'A' || b == b'B' {
                         self.state = State::Triggered;
-                    } else if (0x20..=0x3f).contains(&b) {
-                        // Stay in CsiParam
-                    } else {
+                    } else if !(0x20..=0x3f).contains(&b) {
                         // Other final byte
                         self.state = State::Idle;
                     }
-                    self.inner.write_all(&[b])?;
+                    false
                 }
                 State::Triggered => {
                     if b.is_ascii_digit() {
-                        self.inner.write_all(&ZWSP)?;
                         self.state = State::Idle;
-                    } else if b == 0x1b {
-                        self.state = State::EscSeen;
+                        true
                     } else {
-                        self.state = State::Idle;
+                        self.state = if b == 0x1b { State::EscSeen } else { State::Idle };
+                        false
                     }
-                    self.inner.write_all(&[b])?;
                 }
+            };
+
+            if insert_zwsp {
+                self.inner.write_all(&buf[passthrough_from..i])?;
+                self.inner.write_all(&ZWSP)?;
+                passthrough_from = i;
             }
         }
+
+        self.inner.write_all(&buf[passthrough_from..])?;
         Ok(buf.len())
     }
 
