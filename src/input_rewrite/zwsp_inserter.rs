@@ -49,8 +49,9 @@ impl<W: Write> Write for ZwspInserter<W> {
                 State::EscSeen => {
                     if b == b'[' {
                         self.state = State::CsiStart;
-                    } else if b != 0x1b {
+                    } else if b == 0x1b {
                         // Another ESC restarts the sequence (e.g., \x1b\x1b[A (Alt+Up))
+                    } else {
                         self.state = State::Idle;
                     }
                     false
@@ -60,6 +61,9 @@ impl<W: Write> Write for ZwspInserter<W> {
                         self.state = State::Triggered;
                     } else if (0x20..=0x3f).contains(&b) {
                         self.state = State::CsiParam;
+                    } else if b == 0x1b {
+                        // C0 interrupt aborts CSI and starts a new escape sequence
+                        self.state = State::EscSeen;
                     } else {
                         // Any other final byte (0x40-0x7e) ends the sequence
                         self.state = State::Idle;
@@ -69,7 +73,12 @@ impl<W: Write> Write for ZwspInserter<W> {
                 State::CsiParam => {
                     if b == b'A' || b == b'B' {
                         self.state = State::Triggered;
-                    } else if !(0x20..=0x3f).contains(&b) {
+                    } else if (0x20..=0x3f).contains(&b) {
+                        // Stay in CsiParam
+                    } else if b == 0x1b {
+                        // C0 interrupt aborts CSI and starts a new escape sequence
+                        self.state = State::EscSeen;
+                    } else {
                         // Other final byte
                         self.state = State::Idle;
                     }
@@ -80,7 +89,11 @@ impl<W: Write> Write for ZwspInserter<W> {
                         self.state = State::Idle;
                         true
                     } else {
-                        self.state = if b == 0x1b { State::EscSeen } else { State::Idle };
+                        self.state = if b == 0x1b {
+                            State::EscSeen
+                        } else {
+                            State::Idle
+                        };
                         false
                     }
                 }
